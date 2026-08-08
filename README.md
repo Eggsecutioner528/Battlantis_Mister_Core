@@ -1,6 +1,8 @@
 # Battlantis — MiSTer FPGA Core
 
-A from-scratch Verilog/SystemVerilog reimplementation of the 1987 Konami arcade
+This project was made with the assitance of Gemini and Claude.  This core was a lot of work.
+
+This is a from-scratch Verilog/SystemVerilog reimplementation of the 1987 Konami arcade
 game **Battlantis** (Twin-16 hardware family: MC6809 main CPU, Z80 + dual
 YM3812 sound, K007342 tilemap generator, K007420 sprite generator) for the
 [MiSTer FPGA](https://github.com/MiSTer-devel) platform.
@@ -8,7 +10,9 @@ YM3812 sound, K007342 tilemap generator, K007420 sprite generator) for the
 This is not based on Jotego's JT-series cores. It was built by cross-referencing
 MAME's driver source (`battlnts.cpp`, `k007342.cpp`, `k007420.cpp`) for
 ground-truth bit-level timing and addressing, verified against real Battlantis
-arcade hardware.
+arcade hardware.  However this work would not have been possible without Jotego's work
+mainly thanks to his work on other cores and documentation.  I am deeply greatful
+for this information.
 
 This folder is a clean snapshot of the working tree as of **2026-08-08**,
 containing only the files actually compiled into the core (audited against
@@ -18,7 +22,7 @@ wholesale). It follows on from the last prior commit,
 the sprite BRAM+SDRAM hybrid engine, scroll prefetch rework, tile ROM
 byte-swap fix, and roughly 118 documented debug iterations — existed only in
 an uncommitted working tree full of debug media and MAME reference dumps
-until now.
+until now.  
 
 ## Building
 
