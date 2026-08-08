@@ -1,6 +1,6 @@
 # Battlantis — MiSTer FPGA Core
 
-This project was made with the assitance of Gemini and Claude.  This core was a lot of work.
+This project was made with the assitance of Gemini and Claude.  This core is meant to be free and no one shall charge for thie core.  
 
 This is a from-scratch Verilog/SystemVerilog reimplementation of the 1987 Konami arcade
 game **Battlantis** (Twin-16 hardware family: MC6809 main CPU, Z80 + dual
@@ -35,7 +35,7 @@ quartus_sh --flow compile Template
 
 `build_and_deploy.bat` wraps this and also deploys the resulting `.rbf` +
 `Battlantis.mra` to a MiSTer over SCP (edit `MISTER_IP` for your setup;
-default MiSTer credentials are `root` / `1`).
+default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.bat` to actually deploy you will have to change the IP address to what is listed on your mister.  Looks for 10.0.0. and you will find the OP address that needs to be changed.  It should be near the top.  If deploy fails, the comile will still be successful and can still be manualy deployed.
 
 ## Status
 
