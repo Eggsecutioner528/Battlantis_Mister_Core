@@ -86,7 +86,7 @@ code during the audit for this commit, even though they were listed in the
 original `files.qip`/`Template.qsf`:
 
 - `rtl/jtkcpu/*` (Jotego's HD6309 core) and `rtl/mc6809/mc6809.v` (a wrapper
-  module, `mc6809is`, adapting `jtkcpu` to the MC6809 interface) — neither is
+  module, `mc6809is`, adapting `jtkcpu` to the MC6809 interface) - neither is
   ever instantiated by `Battlantis.sv`, which uses `mc6809i` (Greg Miller's
   core) directly.
 - `rtl/t80/T80pa.vhd` - an alternate T80 top-level wrapper not used; the
