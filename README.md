@@ -42,7 +42,7 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 | Subsystem | Status |
 |---|---|
 | MC6809 main CPU | Working - boots, runs game logic, RAM test passes |
-| K007342 tilemap (backgrounds, text, scroll) | Working — title screen scrolling and tile ROM addressing fixed |
+| K007342 tilemap (backgrounds, text, scroll) | Working - title screen scrolling and tile ROM addressing fixed |
 | K007420 sprites | Working for the large majority of sprites/sizes; see known issues |
 | Palette RAM | Working - sprite palette bank bug fixed and confirmed on hardware |
 | Screen rotation / OSD | Working - Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
