@@ -20,7 +20,7 @@ containing only the files actually compiled into the core (audited against
 wholesale). It follows on from the last prior commit,
 [`9f09c8b`](../Template_MiSTer%20-%20Copy) (2026-07-16); everything since
 the sprite BRAM+SDRAM hybrid engine, scroll prefetch rework, tile ROM
-byte-swap fix, and roughly 118 documented debug iterations — existed only in
+byte-swap fix, and roughly 118 documented debug iterations existed only in
 an uncommitted working tree full of debug media and MAME reference dumps
 until now.  
 
