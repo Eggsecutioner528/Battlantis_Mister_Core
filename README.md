@@ -64,7 +64,7 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
   convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
   core was wrong. Battlantis's actual K007420 has no shadow feature
-  (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) — and was
+  (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) and was
   reverted. Needs fresh diagnosis grounded in K007420's real behavior.
 - **Sound** is wired in but not yet verified against real hardware.
 - **DIP switches** are fully wired to the OSD but have not been verified
