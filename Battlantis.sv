@@ -30,9 +30,10 @@ assign AUDIO_MIX = 2'd0;
 `include "build_id.v" 
 localparam CONF_STR = {
     "Battlantis;;",
-    "O[2:1],Orientation,Vertical,Horiz,Rotate 90,Rotate 270;",
+    "O[1],Orientation,Horizontal,Vertical;",
+    "O[2],Flip Monitor,Off,On;",
     "-;",
-    "O[4:3],Aspect ratio,Original,Full Screen,Pixel Perfect,Pixel Perfect;",
+    "O[4:3],Aspect ratio,Original,Pixel Perfect,Full Screen;",
     "-;",
     "O[6:5],Lives,7,5,3,2;",
     "O[8:7],Difficulty,Very Difficult,Hard,Normal,Easy;",
@@ -42,22 +43,49 @@ localparam CONF_STR = {
     "O[13],Flip Screen,Off,On;",
     "O[14],Upright Controls,Single,Dual;",
     "O[15],Mode,Game,Test;",
-    "O[16],Continues,3 Times,5 Times;",
+    "O[16],Continues,5 Times,3 Times;",
+    "O[20:17],Coin 1,1C 1C,1C 2C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,2C 1C,2C 3C,2C 5C,3C 1C,3C 2C,3C 4C,4C 1C,4C 3C,Free Play;",
+    "O[24:21],Coin 2,1C 1C,1C 2C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,2C 1C,2C 3C,2C 5C,3C 1C,3C 2C,3C 4C,4C 1C,4C 3C,Free Play;",
     "-;",
     "T[0],Reset;",
     "R[0],Reset and close OSD;",
     "V,v",`BUILD_DATE 
 };
 
-// Portrait aspect ratio applies to Vertical (native) and both active-rotation
-// modes; only "Horiz" deliberately keeps landscape AR despite being unrotated.
-wire rotate = (status[2:1] != 2'b01);
+// Orientation menu (status[1]): Horizontal listed first/default (0),
+// Vertical second (1). NOTE: this cabinet's monitor is physically mounted
+// such that the DDR3-actively-rotated path (orientation_vertical=1
+// internally) visually reads as landscape, and the raw-passthrough path
+// (orientation_vertical=0) visually reads as portrait -- the OPPOSITE of
+// what the internal wire naming assumes. Label text is intentionally
+// swapped relative to the internal wire's own "true portrait/landscape"
+// semantics so the menu matches what's actually seen on screen; the wire
+// itself is left alone (only CONF_STR text changed here).
+//
+// Flip Monitor (status[2]) corrects an upside-down mount in either mode:
+// for the raw-passthrough path it drives screen_rotate's native `flip`;
+// for the actively-rotated path (no separate flip primitive while
+// rotating) it picks the rotation direction (CW vs CCW) instead.
+wire orientation_vertical = ~status[1];
+wire flip_monitor         = status[2];
 wire [1:0] ar = status[4:3];
-// Pixel Perfect (ar==2 or 3): true native 256x224 ratio, square pixels, no stretch.
-// 256:224 reduces to 8:7 unrotated; swaps to 7:8 once the image is rotated for a
-// landscape display (the framebuffer's long axis becomes the reported X dimension).
-assign VIDEO_ARX = (!ar) ? (rotate ? 12'd4 : 12'd3) : (ar == 2'd1) ? 12'd0 : (rotate ? 12'd7 : 12'd8);
-assign VIDEO_ARY = (!ar) ? (rotate ? 12'd3 : 12'd4) : (ar == 2'd1) ? 12'd0 : (rotate ? 12'd8 : 12'd7);
+
+// Aspect ratio must match whichever real shape is on screen: Horizontal
+// (raw landscape, true native ratio -- no bezel-cropping concern there)
+// needs the literal landscape numbers; Vertical (rotated portrait, may
+// sit behind cabinet bezel artwork that slightly crops the top/bottom of
+// the visible area on some MisterCade builds) needs a slight vertical
+// squish -- a ratio closer to square than the true native 7:8 -- instead
+// of a clean transpose. Explicit per-orientation tables, not a shared
+// transpose formula: ar==0 (Original) Vertical=10:9, Horizontal=4:3;
+// ar==1 (Pixel Perfect) Vertical=13:12, Horizontal=8:7 (literal); ar==2
+// (Full Screen) is 0:0 (no fixed ratio) either way.
+wire [11:0] vert_arx  = (ar == 2'd0) ? 12'd10 : (ar == 2'd1) ? 12'd13 : 12'd0;
+wire [11:0] vert_ary  = (ar == 2'd0) ? 12'd9  : (ar == 2'd1) ? 12'd12 : 12'd0;
+wire [11:0] horiz_arx = (ar == 2'd0) ? 12'd4  : (ar == 2'd1) ? 12'd8  : 12'd0;
+wire [11:0] horiz_ary = (ar == 2'd0) ? 12'd3  : (ar == 2'd1) ? 12'd7  : 12'd0;
+assign VIDEO_ARX = orientation_vertical ? vert_arx : horiz_arx;
+assign VIDEO_ARY = orientation_vertical ? vert_ary : horiz_ary;
 
 wire [1:0] buttons;
 wire [127:0] status;
@@ -490,7 +518,13 @@ wire [7:0] vga_b = {pal_b, pal_b[4:2]};
 // ==============================================================================
 
 // Inputs
-wire [7:0] dip_switch_1 = 8'hFF; // Coinage (Default)
+// Coinage (DSW1): matches MAME's KONAMI_COINAGE_LOC table / the manual's
+// Coin 1 (SW1-4) and Coin 2 (SW5-8) tables exactly. Switches are active
+// low (OFF=1), so each nibble is the bitwise NOT of the OSD's 0-15 index
+// (index 0 = all switches OFF = 1 Coin/1 Credit, matching the default).
+wire [3:0] coin1_opt = status[20:17];
+wire [3:0] coin2_opt = status[24:21];
+wire [7:0] dip_switch_1 = {~coin2_opt, ~coin1_opt};
 
 // DIP Switch 2 mapping from OSD
 wire [1:0] lives_opt = status[6:5];   // 00=7, 01=5, 10=3, 11=2
@@ -507,10 +541,13 @@ wire m_start2 = joystick_1[7];
 wire flip_opt = status[13]; // 0=Off (0x20), 1=On (0x00)
 wire ctrl_opt = status[14]; // 0=Single (0x40), 1=Dual (0x00)
 wire test_opt = status[15]; // 0=Game (0x00), 1=Test (0x80)
-wire cont_opt = status[16]; // 0=3 Times (0x00), 1=5 Times
+wire cont_opt = status[16]; // 0=5 Times (0x00, factory default per manual/MAME), 1=3 Times (0x80)
 wire [7:0] dip_switch_3 = (status[16:0] == 17'd0) ? {1'b1, 2'b11, ~m_start2, ~m_start1, 2'b11, ~m_coin1} : {~test_opt, ~ctrl_opt, ~flip_opt, ~m_start2, ~m_start1, 2'b11, ~m_coin1};
 
-wire [7:0] player_1_inputs = {3'b111, ~joystick_0[4], ~joystick_0[3], ~joystick_0[2], ~joystick_0[0], ~joystick_0[1]};
+// Bit 7 (MAME PORT_DIPNAME 0x80 on the P1 port, not DSW3) is the
+// Allow_Continue DIP -- was previously hardcoded to 1'b1 (always "3
+// Times"), leaving the "Continues" OSD option wired to nothing.
+wire [7:0] player_1_inputs = {cont_opt, 2'b11, ~joystick_0[4], ~joystick_0[3], ~joystick_0[2], ~joystick_0[0], ~joystick_0[1]};
 wire [7:0] player_2_inputs = 8'hFF; // Unused for now, default to unpressed
 
 // 4KB Work RAM (0x3000 - 0x3FFF)
@@ -580,8 +617,18 @@ assign cpu_din = (cpu_addr >= 16'h4000) ? cpu_rom_dout : cpu_data_in_reg;
 // FRAMEWORK SAFE-TIES (Displaying VRAM data)
 // ==============================================================================
 
-// Define the active display area (the "canvas" where the game renders)
-wire active_area = (h_cnt < 256 && v_cnt < 224);
+// Define the active display area (the "canvas" where the game renders).
+// Per MAME's screen.set_raw(24_MHz_XTAL/4, 384, 0, 256, 264, 16, 240) for
+// battlnts, real hardware's active vertical window is v_cnt 16..239 (still
+// 224 lines), NOT 0..223. We were treating v_cnt 0..223 as active, which
+// showed 2 tile-rows too early at the top (whatever's in VRAM rows 0-1) and
+// cropped 2 real rows off the bottom -- invisible on busy/scrolling gameplay
+// content, but a clean ~16px (2-tile-row) downward shift on any static,
+// symmetric screen (confirmed via the attract-mode kill-count screen's
+// black square, measured off-center by almost exactly this amount).
+// v_cnt itself and the tile-fetch pipeline (next_v, etc.) are untouched --
+// only which slice of the already-computed v_cnt range counts as on-screen.
+wire active_area = (h_cnt < 256 && (v_cnt >= 16 && v_cnt < 240));
 
 // The pixel color pipeline lags h_cnt by 2 ce_pix cycles: 1 cycle in k007342's own
 // registered pixel_color output, plus 1 more cycle in the palette RAM lookup below
@@ -601,26 +648,42 @@ wire active_area_disp = active_area_sr[1];
 // Setting h_sync near the end of the line ensures the back porch is correct.
 assign h_sync = (h_cnt >= 320 && h_cnt < 352); // Active HIGH sync pulses
 assign v_sync = (v_cnt >= 244 && v_cnt < 247); // Active HIGH sync
-// Orientation menu (status[2:1]): 00=Vertical, 01=Horiz, 10=Rotate 90, 11=Rotate 270.
-// Vertical/Horiz = raw passthrough (no_rotate) - for monitors physically mounted
-// rotated already (e.g. an arcade-style vertical CRT setup). Rotate 90/270 actively
-// rotate via the DDR3 framebuffer for landscape displays that can't be physically
-// rotated - the two options give both rotation directions since which one looks
-// right depends on which way the user's display expects it.
-wire no_rotate  = (status[2:1] == 2'b00) || (status[2:1] == 2'b01);
-wire rotate_ccw = (status[2:1] == 2'b11);
-wire flip       = 1'b0;
+// no_rotate=1: raw passthrough, DDR3 bypassed entirely (menu label
+// "Vertical" on this cabinet -- see orientation_vertical comment above).
+// no_rotate=0: actively rotated via DDR3 (menu label "Horizontal", the
+// default). Flip Monitor: for the raw-passthrough path it drives
+// screen_rotate's native `flip` (180 degree flip, only used when
+// no_rotate=1 -- screen_rotate ignores it otherwise); for the
+// actively-rotated path it picks the rotation direction (CW vs CCW)
+// since there's no separate flip primitive while rotating. Both
+// confirmed on hardware to need the direct (non-inverted) flip_monitor
+// mapping: rotate_ccw=0 / flip=0 at Flip off gives the correct
+// orientation in each respective path.
+wire no_rotate  = ~orientation_vertical;
+wire rotate_ccw = flip_monitor;
+wire flip       = flip_monitor;
 wire video_rotated;
 
+// screen_rotate must consume arcade_video's OUTPUT (post-video_mixer VGA_R/
+// G/B/HS/VS/DE/CE_PIXEL), not the core's raw pre-mixer signals. Test 119
+// found that feeding it the raw signals (as this used to) corrupted the
+// picture: every prior hardware confirmation this session validated video
+// timing only through the arcade_video/video_mixer output path (no_rotate=1
+// bypassed screen_rotate entirely), so that pipelined/resampled signal is
+// the one screen_rotate's auto-measured hsz/vsz and DDR3 write gating
+// actually need to match -- not the earlier raw core-side timing. Matches
+// the reference wiring pattern in jtcores_ref's jtframe_mister.sv, where
+// screen_rotate is chained off arcade_video's scan2x_* outputs, not the
+// core's raw video.
 screen_rotate screen_rotate (
-    .CLK_VIDEO(clk_sys),
-    .CE_PIXEL(ce_pix),
-    .VGA_R(vga_r),
-    .VGA_G(vga_g),
-    .VGA_B(vga_b),
-    .VGA_HS(h_sync),
-    .VGA_VS(v_sync),
-    .VGA_DE(active_area_disp),
+    .CLK_VIDEO(CLK_VIDEO),
+    .CE_PIXEL(CE_PIXEL),
+    .VGA_R(VGA_R),
+    .VGA_G(VGA_G),
+    .VGA_B(VGA_B),
+    .VGA_HS(VGA_HS),
+    .VGA_VS(VGA_VS),
+    .VGA_DE(VGA_DE),
     .rotate_ccw(rotate_ccw),
     .no_rotate(no_rotate),
     .flip(flip),
@@ -650,7 +713,7 @@ arcade_video #(256, 24) arcade_video (
     .ce_pix(ce_pix),
     .RGB_in({vga_r, vga_g, vga_b}),
     .HBlank(~active_area_disp),
-    .VBlank(~(v_cnt < 224)),
+    .VBlank(~(v_cnt >= 16 && v_cnt < 240)),
     .HSync(h_sync),
     .VSync(v_sync),
     .CLK_VIDEO(CLK_VIDEO),

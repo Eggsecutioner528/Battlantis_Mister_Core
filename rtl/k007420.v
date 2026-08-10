@@ -421,7 +421,12 @@ module k007420 (
                         // (lower index) have higher priority. We ALWAYS overwrite
                         // whatever is in the line buffer (background or lower-priority sprite).
                         draw_addr <= cur_draw_x[7:0];
-                        draw_data <= {4'd0, cur_pixel}; // MAME uses color = 0 for all Battlantis sprites
+                        // MAME's sprite_callback zeroes the runtime `color` param, but
+                        // GFXDECODE_ENTRY("sprites", ..., 4*16, 1) hardcodes color_base=64
+                        // (colors 64-79 = palette bank 4). Actual index = color_base +
+                        // color*granularity = 64 + 0*16 = 64, i.e. bank 4, not bank 0 --
+                        // keeps sprites out of the tilemap's bank-0 (background) colors.
+                        draw_data <= {4'd4, cur_pixel};
                         draw_we   <= 1;
                     end
                     

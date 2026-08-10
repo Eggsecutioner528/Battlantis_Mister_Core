@@ -44,25 +44,22 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 | MC6809 main CPU | Working — boots, runs game logic, RAM test passes |
 | K007342 tilemap (backgrounds, text, scroll) | Working — title screen scrolling and tile ROM addressing fixed |
 | K007420 sprites | Working for the large majority of sprites/sizes; see known issues |
-| Palette RAM | Working, but see known issues (color bug) |
-| Screen rotation / OSD | Wired up (`screen_rotate`, aspect ratio options) |
+| Palette RAM | Working — sprite palette bank bug fixed and confirmed on hardware |
+| Screen rotation / OSD | Working — Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
+| DIP switches | Wired up (Coinage, Lives, Difficulty, Bonus Life, Demo Sounds, Cabinet, Flip Screen, Upright Controls, Mode, Continues) per the owner's manual and MAME source; not yet verified against a physical PCB |
 | Sound (Z80 + dual YM3812) | Wired into `Battlantis.sv`; not yet verified on real hardware |
 
 ## Known issues
 
-- **Palette bug**: some sprites (e.g. the Ogre) and the boot self-test digits
-  render blue instead of their correct red/brown. Likely a palette index or
-  color-attribute issue in `k007342.v` / the sprite palette bank path.
-- **Vertical geometry offset**: the OSD's pixel-perfect aspect ratio mode has
-  a reproducible ~6% vertical offset (content shifted toward the bottom of
-  the frame). Confirmed via perspective-corrected measurement against a
-  clean reference frame from the original arcade attract-mode demo;
-  horizontal centering is correct. Root cause not yet identified — likely in
-  vertical scaling/porch timing in the scaler/rotation path.
+- **Upper-address sprites**: sprites served from the upper SDRAM-backed ROM
+  range (Gargoyle, Grimlock, Ogre wall-climb, Carriage, Red Dragon, stage
+  bosses) intermittently render as missing or as corrupted lines/streaks
+  instead of clean sprite art. Top priority open issue.
 - **Ogre 16×16 wall-climb static**: the Ogre's 8×8 wall-running form renders
   correctly, but its 16×16 wall-climb form progressively degrades into static
   as it climbs. Leading theory is SDRAM Port 3 bandwidth contention (16×16
-  needs ~4x the byte-fetches of 8×8 per instance), unconfirmed.
+  needs ~4x the byte-fetches of 8×8 per instance), unconfirmed. Likely related
+  to the upper-address sprite issue above.
 - **Sprite halo/outline artifact**: an unresolved visual artifact on some
   sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
   convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
@@ -70,7 +67,8 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) — and was
   reverted. Needs fresh diagnosis grounded in K007420's real behavior.
 - **Sound** is wired in but not yet verified against real hardware.
-- **DIP switches** have not been verified against physical PCB behavior.
+- **DIP switches** are fully wired to the OSD but have not been verified
+  against physical PCB behavior.
 
 ## Third-party cores
 
