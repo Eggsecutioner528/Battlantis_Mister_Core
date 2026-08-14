@@ -50,23 +50,31 @@ module sdram_arbiter (
     wire [7:0] sdram_byte_out = sdram_dout[15:8];
 
     reg latched_p0_req, latched_p1_req, latched_p2_req, latched_p3_req;
-    assign p0_busy = latched_p0_req;
+    // p0_busy must reflect p0_req the SAME cycle it's first asserted, not one
+    // cycle later once latched_p0_req has registered -- otherwise HPS's IOCTL
+    // stream, which can sample ioctl_wait combinationally, sees "not busy" for
+    // one cycle and advances to the next byte before the arbiter has actually
+    // started processing the current one, silently dropping it during rapid
+    // back-to-back streaming (confirmed via a local FPGA-internal SDRAM
+    // loopback self-test: single isolated writes always succeed, but this is
+    // the only difference between that and the real multi-byte IOCTL download).
+    assign p0_busy = p0_req | latched_p0_req;
 
     reg [24:0] latched_p0_addr, latched_p1_addr, latched_p2_addr, latched_p3_addr;
     reg [7:0] latched_p0_din;
-    
+
     reg last_p0_req, last_p1_req, last_p2_req, last_p3_req;
     reg last_p0_addr_valid;
 
-    reg latched_sdram_ready;
-
-    always @(posedge clk) begin
-        if (reset || state == 0) begin
-            latched_sdram_ready <= 0;
-        end else if (sdram_ready) begin
-            latched_sdram_ready <= 1;
-        end
-    end
+    // sdram.sv's `ready` is a level signal that stays high from the PREVIOUS
+    // idle period until it sees the rd/we edge in state 1 -- in the gap
+    // between leaving state 0 and that edge (states 4 and the start of 1), an
+    // earlier latched-ready mechanism here could latch true almost
+    // immediately from the stale pre-request value, reporting "done" before
+    // the real SDRAM transaction had even been issued and sampling stale/zero
+    // data instead of waiting out the actual CAS latency. Waiting on live
+    // sdram_ready directly is correct here since it genuinely drops low once
+    // the request is registered.
 
     always @(posedge clk) begin
         if (reset) begin
@@ -123,32 +131,27 @@ module sdram_arbiter (
                         end else if (latched_p1_req) begin // CPU 6809 Main ROM
                             sdram_addr <= latched_p1_addr;
                             active_port <= 1;
-                            latched_p1_req <= 0;
                             state <= 4;
                         end else if (latched_p2_req && latched_p3_req) begin
                             // Both Tilemaps and Sprites requesting: Round-Robin fair arbitration
                             if (rr_toggle == 1'b0) begin
                                 sdram_addr <= latched_p2_addr;
                                 active_port <= 2;
-                                latched_p2_req <= 0;
                                 rr_toggle <= 1'b1;
                                 state <= 4;
                             end else begin
                                 sdram_addr <= latched_p3_addr;
                                 active_port <= 3;
-                                latched_p3_req <= 0;
                                 rr_toggle <= 1'b0;
                                 state <= 4;
                             end
                         end else if (latched_p2_req) begin
                             sdram_addr <= latched_p2_addr;
                             active_port <= 2;
-                            latched_p2_req <= 0;
                             state <= 4;
                         end else if (latched_p3_req) begin
                             sdram_addr <= latched_p3_addr;
                             active_port <= 3;
-                            latched_p3_req <= 0;
                             state <= 4;
                         end
                     end
@@ -177,7 +180,7 @@ module sdram_arbiter (
                 end
                 
                 2: begin // Wait for SDRAM to finish
-                    if (sdram_ready || latched_sdram_ready) begin
+                    if (sdram_ready) begin
                         // Read or Write complete
                         if (active_port == 0) begin
                             p0_ready <= 1;
@@ -196,9 +199,12 @@ module sdram_arbiter (
                 end
                 
                 3: begin // Cooldown (ensures requesters deassert their req)
-                    if (active_port == 0) begin
-                        latched_p0_req <= 0; // Release ioctl_wait
-                    end
+                    case (active_port)
+                        0: latched_p0_req <= 0;
+                        1: latched_p1_req <= 0;
+                        2: latched_p2_req <= 0;
+                        3: latched_p3_req <= 0;
+                    endcase
                     state <= 0;
                 end
             endcase

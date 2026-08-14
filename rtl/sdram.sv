@@ -30,7 +30,12 @@ module sdram
 (
    input             init,        // reset to initialize RAM
    input             clk,         // clock ~100MHz
-                                  //
+   input             sdram_clk_in, // phase-shifted clk for SDRAM_CLK, from PLL outclk_1 --
+                                   // replaces an earlier internal altddio_out 180deg-shift DDR
+                                   // register, which had no SDC timing constraint and could
+                                   // route through general fabric with unpredictable added
+                                   // delay, eating into the SDRAM read-data setup margin
+                                   //
                                   // SDRAM_* - signals to the MT48LC16M16 chip
    inout  reg [15:0] SDRAM_DQ,    // 16 bit bidirectional data bus
    output reg [12:0] SDRAM_A,     // 13 bit multiplexed address bus
@@ -189,7 +194,15 @@ always @(posedge clk) begin
 			if(save_we) begin
 				command  <= CMD_WRITE;
 				SDRAM_DQ <= new_wtbt ? new_data : {new_data[7:0], new_data[7:0]};
-				state    <= STATE_IDLE_2;
+				// Extended from STATE_IDLE_2 (2-cycle cooldown) -- confirmed via a
+				// controlled FPGA-internal loopback test that rapid back-to-back
+				// writes fail while isolated single writes succeed. Auto-precharge
+				// (SDRAM_A[10]=1, hardwired for all ops) means the chip's internal
+				// precharge doesn't start until tWR after the write completes; the
+				// next row activation then needs tRP on top of that. STATE_IDLE_4
+				// gives the physical chip more margin for tWR+tRP before the next
+				// CMD_ACTIVE can be issued.
+				state    <= STATE_IDLE_4;
 			end
 			else begin
 				command  <= CMD_READ;
@@ -217,29 +230,8 @@ always @(posedge clk) begin
 	end
 end
 
-altddio_out
-#(
-	.extend_oe_disable("OFF"),
-	.intended_device_family("Cyclone V"),
-	.invert_output("OFF"),
-	.lpm_hint("UNUSED"),
-	.lpm_type("altddio_out"),
-	.oe_reg("UNREGISTERED"),
-	.power_up_high("OFF"),
-	.width(1)
-)
-sdramclk_ddr
-(
-	.datain_h(1'b0),
-	.datain_l(1'b1),
-	.outclock(clk),
-	.dataout(SDRAM_CLK),
-	.aclr(1'b0),
-	.aset(1'b0),
-	.oe(1'b1),
-	.outclocken(1'b1),
-	.sclr(1'b0),
-	.sset(1'b0)
-);
+// SDRAM_CLK driven directly from the pre-shifted PLL clock (see module port
+// comment above) instead of an internally-generated altddio_out DDR shift.
+assign SDRAM_CLK = sdram_clk_in;
 
 endmodule

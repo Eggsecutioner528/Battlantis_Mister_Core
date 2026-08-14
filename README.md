@@ -14,17 +14,16 @@ arcade hardware.  However this work would not have been possible without Jotego'
 mainly thanks to his work on other cores and documentation.  I am deeply greatful
 for this information.
 
-This folder is a clean snapshot of the working tree as of **2026-08-08**
-(RTL files below; see "Status" and "Known issues" for what's changed since
-in the active working tree, not yet re-synced here),
-containing only the files actually compiled into the core (audited against
-`Template.qsf` / `files.qip` and every module instantiation, not just copied
-wholesale). It follows on from the last prior commit,
-[`9f09c8b`](../Template_MiSTer%20-%20Copy) (2026-07-16); everything since
-the sprite BRAM+SDRAM hybrid engine, scroll prefetch rework, tile ROM
-byte-swap fix, and roughly 118 documented debug iterations existed only in
-an uncommitted working tree full of debug media and MAME reference dumps
-until now.  
+This folder is a clean snapshot of the working tree, most recently re-synced
+**2026-08-14** (containing only the files actually compiled into the core,
+audited against `Template.qsf` / `files.qip` and every module instantiation,
+not just copied wholesale). The active working tree runs far ahead of this
+snapshot at any given time -- it accumulates diagnostic instrumentation and
+in-progress experiments (SignalTap-style overlays, shadow-verification state
+machines, isolation tests) needed to actually find and confirm bugs, none of
+which belongs in a public release build. This snapshot is re-synced
+periodically by hand-porting only the specific, proven fixes out of that
+working tree, with all diagnostic scaffolding stripped back out.
 
 ## Building
 
@@ -45,7 +44,7 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 |---|---|
 | MC6809 main CPU | Working - boots, runs game logic, RAM test passes |
 | K007342 tilemap (backgrounds, text, scroll) | Working - title screen scrolling and tile ROM addressing fixed |
-| K007420 sprites | Working for the large majority of sprites/sizes; see known issues |
+| K007420 sprites | Working for the large majority of sprites/sizes; significantly improved 2026-08-14 (BRAM cache reallocation, size-code fix); see known issues |
 | Palette RAM | Working - sprite palette bank bug fixed and confirmed on hardware |
 | Screen rotation / OSD | Working - Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
 | DIP switches | Wired up (Coinage, Lives, Difficulty, Bonus Life, Demo Sounds, Cabinet, Flip Screen, Upright Controls, Mode, Continues) per the owner's manual and MAME source; not yet verified against a physical PCB |
@@ -53,41 +52,50 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 
 ## Known issues
 
-- **Upper-address sprites (SDRAM Port 3)**: still the top-priority open issue,
-  but real progress since the 2026-08-08 snapshot. Found and fixed a genuine
-  arbiter race condition in `sdram_arbiter.sv` — `latched_pX_req` for Ports
-  1/2/3 was being cleared at request *dispatch* instead of transaction
-  *completion*, letting a continuously-held request line get spuriously
-  re-latched with a stale address mid-transaction and silently drop the
-  requester's real next request. Found via a cycle-accurate ModelSim
-  simulation, fixed, and confirmed on real hardware to have helped (a
-  previously fully-invisible enemy portrait now renders correctly). Not a
-  full fix, though: some sprites are still missing (Gustaff/Gargoyle on at
-  least one enemy-tally screen) even with real, non-corrupted SDRAM traffic
-  confirmed flowing during gameplay. A decisive follow-up test is in
-  progress: temporarily forcing *every* sprite fetch through SDRAM Port 3
-  (bypassing the 64KB BRAM cache entirely, including sprites known to render
-  perfectly from BRAM today) to determine once and for all whether Port 3
-  is fully trustworthy for real gameplay data, or still has a genuine
-  data-correctness bug independent of address range.
-- **Ogre 16×16 wall-climb static**: the Ogre's 8×8 wall-running form renders
-  correctly, but its 16×16 wall-climb form progressively degrades into static
-  as it climbs. Leading theory is SDRAM Port 3 bandwidth contention (16×16
-  needs ~4x the byte-fetches of 8×8 per instance), unconfirmed. Likely related
-  to the upper-address sprite issue above.
-- **Purple/magenta static corruption tied to the Dragon boss**: newly
-  observed this session on the Game Over / late-stage screen when the Dragon
-  boss appears. Not yet investigated — deprioritized in favor of the SDRAM
-  Port 3 work above, at the project owner's explicit direction.
+- **SDRAM Port 3 reliability for isolated/random-jump sprite fetches**: the
+  root architectural constraint behind most sprite issues below. Extensive
+  testing (ModelSim simulation with a real Micron SDRAM behavioral model,
+  plus controlled hardware A/B tests) proved this is a genuine, repeatable
+  hardware access-pattern limitation, not a logic bug: fully sequential
+  SDRAM access (e.g. a full linear sweep) is 100% reliable, but isolated,
+  randomly-jumping single-byte reads -- exactly how sprite fetching works,
+  hopping between OAM slots and ROM addresses every frame -- fail
+  essentially 100% of the time on this hardware/timing configuration. The
+  practical mitigation implemented here is a BRAM cache: sprites needing
+  addresses outside the primary 64KB BRAM window are served from six
+  additional small BRAM "slots" mapped to specific known-problem address
+  ranges (Ogre/Goblin's wall-climb and running tiles, Gargoyle's
+  tally-screen portrait including its second animation frame) rather than
+  through SDRAM at all. This resolved every sprite listed as fixed below,
+  but is inherently a per-address patch, not a general fix -- any
+  not-yet-covered address range remains subject to the same underlying
+  limitation. A from-scratch architectural fix (moving background tilemap
+  data to SDRAM, where its access pattern is closer to the reliable
+  sequential case, and freeing the reclaimed BRAM to expand sprite
+  coverage) is under active investigation in the working tree, not yet
+  ready to sync here.
+- **Ogre 16×16 wall-climb static**: fixed 2026-08-14 via the BRAM cache
+  slot reallocation above.
+- **Gargoyle / tally-screen portraits**: significantly improved via the same
+  BRAM slot reallocation (both of Gargoyle's animation frames now render),
+  but coverage isn't exhaustive across every sprite/address in this family --
+  report any that still fail to render.
+- **Purple/magenta static on the Game Over / late-stage screen**: confirmed
+  to be an intentional visual effect of the original arcade hardware, not a
+  bug -- no fix needed.
 - **Sprite halo/outline artifact**: an unresolved visual artifact on some
   sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
   convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
   core was wrong. Battlantis's actual K007420 has no shadow feature
   (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) and was
   reverted. Needs fresh diagnosis grounded in K007420's real behavior.
+- **Spined Devil position**: reported incorrect on the green-void transition
+  screen; not yet root-caused.
 - **Sound** is wired in but not yet verified against real hardware.
-- **DIP switches** are fully wired to the OSD but have not been verified
-  against physical PCB behavior.
+- **DIP switches** are wired to the OSD (including a 2026-08-14 fix for the
+  physical Test/Service button, previously tied off and unable to exit
+  service mode once entered) but have not been fully verified against
+  physical PCB behavior.
 
 ## Third-party cores
 

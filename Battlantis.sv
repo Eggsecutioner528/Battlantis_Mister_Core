@@ -131,8 +131,9 @@ wire [15:0] sdram_din;
 
 sdram sdram_inst (
     .init(~locked),
-    .clk(clk_sys), 
-    
+    .clk(clk_sys),
+    .sdram_clk_in(sdram_clk_shifted),
+
     // SDRAM pins
     .SDRAM_DQ(SDRAM_DQ),
     .SDRAM_A(SDRAM_A),
@@ -241,11 +242,13 @@ sdram_arbiter arbiter (
 // CLOCKS
 wire clk_sys;
 wire locked;
+wire sdram_clk_shifted; // phase-shifted 48MHz for SDRAM_CLK, see pll_0002.v / sdram.sv
 
 pll pll(
 	.refclk(CLK_50M),
 	.rst(1'b0),
 	.outclk_0(clk_sys), // Needs to be 48MHz
+	.outclk_1(sdram_clk_shifted),
 	.locked(locked)
 );
 
@@ -535,14 +538,22 @@ wire cab_opt         = status[12];    // 0=Upright (0x00), 1=Cocktail (0x04)
 wire [7:0] dip_switch_2 = (status[16:0] == 17'd0) ? 8'hA6 : { demo_opt, diff_opt, bonus_opt, cab_opt, lives_opt }; 
 
 // DSW3: bit 0: Coin1, bit 1: Coin2, bit 3: Start1, bit 4: Start2
+// joystick_0[6] repurposed as the physical Test/Service button (it was
+// unused by every other input on this core -- 0,1,2,3,4,5,7 all taken).
+// Without it wired, DSW3 bit 1 (Test/Service) was permanently tied high
+// (unpressed), meaning there was no way to advance past service mode's
+// initial screen (e.g. a monitor alignment/geometry pattern) once the Mode
+// DIP put the board into test mode on reset -- confirmed via a board
+// reaching that screen and going no further.
 wire m_coin1  = joystick_0[5] | joystick_1[5]; // Usually Select/Coin
 wire m_start1 = joystick_0[7];
 wire m_start2 = joystick_1[7];
+wire m_test   = joystick_0[6];
 wire flip_opt = status[13]; // 0=Off (0x20), 1=On (0x00)
 wire ctrl_opt = status[14]; // 0=Single (0x40), 1=Dual (0x00)
 wire test_opt = status[15]; // 0=Game (0x00), 1=Test (0x80)
 wire cont_opt = status[16]; // 0=5 Times (0x00, factory default per manual/MAME), 1=3 Times (0x80)
-wire [7:0] dip_switch_3 = (status[16:0] == 17'd0) ? {1'b1, 2'b11, ~m_start2, ~m_start1, 2'b11, ~m_coin1} : {~test_opt, ~ctrl_opt, ~flip_opt, ~m_start2, ~m_start1, 2'b11, ~m_coin1};
+wire [7:0] dip_switch_3 = (status[16:0] == 17'd0) ? {1'b1, 2'b11, ~m_start2, ~m_start1, 1'b1, ~m_test, ~m_coin1} : {~test_opt, ~ctrl_opt, ~flip_opt, ~m_start2, ~m_start1, 1'b1, ~m_test, ~m_coin1};
 
 // Bit 7 (MAME PORT_DIPNAME 0x80 on the P1 port, not DSW3) is the
 // Allow_Continue DIP -- was previously hardcoded to 1'b1 (always "3
@@ -725,7 +736,7 @@ arcade_video #(256, 24) arcade_video (
     .VGA_VS(VGA_VS),
     .VGA_DE(VGA_DE),
     .VGA_SL(VGA_SL),
-    .fx(status[17:15]),
+    .fx(3'b000), // No "Scanlines" CONF_STR entry exists; was reading unrelated Mode/Continues/Coin1 bits
     .forced_scandoubler(0),
     .gamma_bus(gamma_bus)
 );

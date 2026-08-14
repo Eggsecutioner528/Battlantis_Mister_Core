@@ -145,14 +145,21 @@ module k007420 (
     // Asmodeus, Stage 3/6 bosses) and 8x8/8x16/16x8 elsewhere. Hardcoding max=15
     // here previously clamped 32x32 sprites to a 16x16 box, cutting off their
     // bottom/right half. Bounds must track the same size code used by final_8x8_index below.
+    // All 5 real MAME size codes explicitly enumerated (rather than lumping
+    // 16x16 into a shared default with the genuinely-reserved codes) so only
+    // the 3 truly-reserved codes (101/110/111) reach the 8x8 fallback.
     wire [4:0] max_y = (spr_flags[6:4] == 3'b100) ? 5'd31 :  // 32x32
                        (spr_flags[6:4] == 3'b011) ? 5'd7  :  // 8x8
                        (spr_flags[6:4] == 3'b010) ? 5'd7  :  // 16x8
-                                                     5'd15;   // 16x16 / 8x16 / default
+                       (spr_flags[6:4] == 3'b001) ? 5'd15 :  // 8x16
+                       (spr_flags[6:4] == 3'b000) ? 5'd15 :  // 16x16
+                                                     5'd7;    // reserved 101/110/111 -> MAME default (8x8)
     wire [4:0] max_x = (spr_flags[6:4] == 3'b100) ? 5'd31 :  // 32x32
                        (spr_flags[6:4] == 3'b011) ? 5'd7  :  // 8x8
                        (spr_flags[6:4] == 3'b001) ? 5'd7  :  // 8x16
-                                                     5'd15;   // 16x16 / 16x8 / default
+                       (spr_flags[6:4] == 3'b010) ? 5'd15 :  // 16x8
+                       (spr_flags[6:4] == 3'b000) ? 5'd15 :  // 16x16
+                                                     5'd7;    // reserved 101/110/111 -> MAME default (8x8)
     
     // 13-bit base 8x8 tile index based exactly on MAME's battlnts_state::sprite_callback:
     // code |= ((color & 0xc0) << 2) | m_spritebank; code = (code << 2) | ((color & 0x30) >> 4);
@@ -232,10 +239,58 @@ module k007420 (
     reg [15:0] sprite_bram_addr;
     reg [7:0]  sprite_bram_dout;
 
+    // Six extra BRAM cache slots (2026-08-13): mapped into the primary 64KB
+    // window's own measured slack (M10K budget is fully committed -- there is
+    // no room to make the array itself bigger) rather than expanding it. Each
+    // slot serves a confirmed-failing-via-SDRAM address range (Ogre/Goblin's
+    // wall-climb/running tiles, Gargoyle's tally-screen portrait, including
+    // its second animation frame) from the same reliable 1-cycle BRAM cache
+    // instead of the SDRAM path, which is unreliable for this kind of
+    // isolated random-jump sprite fetch pattern.
+    localparam [24:0] SLOT1_ROM_BASE  = 25'h35C00; // absolute ioctl addr (0x15C00 relative + 0x20000 sprite-ROM base)
+    localparam [17:0] SLOT1_REL_BASE  = 18'h15C00;
+    localparam [15:0] SLOT1_BRAM_BASE = 16'hE000;
+    localparam [15:0] SLOT1_SIZE      = 16'h0400; // 1KB
+    localparam [24:0] SLOT2_ROM_BASE  = 25'h3DE00; // absolute ioctl addr (0x1DE00 relative + 0x20000 sprite-ROM base)
+    localparam [17:0] SLOT2_REL_BASE  = 18'h1DE00;
+    localparam [15:0] SLOT2_BRAM_BASE = 16'hE400;
+    localparam [15:0] SLOT2_SIZE      = 16'h0200; // 512B
+    localparam [24:0] SLOT3_ROM_BASE  = 25'h47400; // 0x27400 relative + 0x20000
+    localparam [17:0] SLOT3_REL_BASE  = 18'h27400;
+    localparam [15:0] SLOT3_BRAM_BASE = 16'hE600;
+    localparam [15:0] SLOT3_SIZE      = 16'h0C00; // 3KB
+    localparam [24:0] SLOT4_ROM_BASE  = 25'h55C00; // 0x35C00 relative + 0x20000
+    localparam [17:0] SLOT4_REL_BASE  = 18'h35C00;
+    localparam [15:0] SLOT4_BRAM_BASE = 16'hF200;
+    localparam [15:0] SLOT4_SIZE      = 16'h0400; // 1KB
+    // Slots 5/6 (Gargoyle) cover the full 512B-aligned tile block a 32x32
+    // sprite's final_8x8_index actually spans, widened to 1KB each to also
+    // include the adjacent 512B block used by its second animation frame.
+    localparam [24:0] SLOT5_ROM_BASE  = 25'h3BC00; // 0x1BC00 relative + 0x20000 (Gargoyle frame 1+2: 0x1BC00-0x1BFFF)
+    localparam [17:0] SLOT5_REL_BASE  = 18'h1BC00;
+    localparam [15:0] SLOT5_BRAM_BASE = 16'hF600;
+    localparam [15:0] SLOT5_SIZE      = 16'h0400; // 1KB
+    localparam [24:0] SLOT6_ROM_BASE  = 25'h3F200; // 0x1F200 relative + 0x20000 (Gargoyle frame 1+2: 0x1F200-0x1F5FF)
+    localparam [17:0] SLOT6_REL_BASE  = 18'h1F200;
+    localparam [15:0] SLOT6_BRAM_BASE = 16'hFA00;
+    localparam [15:0] SLOT6_SIZE      = 16'h0400; // 1KB
+
     always @(posedge clk) begin
         if (ioctl_wr) begin
             if (ioctl_addr >= 25'h20000 && ioctl_addr < 25'h30000) begin
                 sprite_rom_bram[ioctl_addr[15:0]] <= ioctl_dout; // 64KB BRAM Cache (0x00000 - 0x0FFFF)
+            end else if (ioctl_addr >= SLOT1_ROM_BASE && ioctl_addr < (SLOT1_ROM_BASE + {9'd0, SLOT1_SIZE})) begin
+                sprite_rom_bram[SLOT1_BRAM_BASE + (ioctl_addr[15:0] - SLOT1_REL_BASE[15:0])] <= ioctl_dout;
+            end else if (ioctl_addr >= SLOT2_ROM_BASE && ioctl_addr < (SLOT2_ROM_BASE + {9'd0, SLOT2_SIZE})) begin
+                sprite_rom_bram[SLOT2_BRAM_BASE + (ioctl_addr[15:0] - SLOT2_REL_BASE[15:0])] <= ioctl_dout;
+            end else if (ioctl_addr >= SLOT3_ROM_BASE && ioctl_addr < (SLOT3_ROM_BASE + {9'd0, SLOT3_SIZE})) begin
+                sprite_rom_bram[SLOT3_BRAM_BASE + (ioctl_addr[15:0] - SLOT3_REL_BASE[15:0])] <= ioctl_dout;
+            end else if (ioctl_addr >= SLOT4_ROM_BASE && ioctl_addr < (SLOT4_ROM_BASE + {9'd0, SLOT4_SIZE})) begin
+                sprite_rom_bram[SLOT4_BRAM_BASE + (ioctl_addr[15:0] - SLOT4_REL_BASE[15:0])] <= ioctl_dout;
+            end else if (ioctl_addr >= SLOT5_ROM_BASE && ioctl_addr < (SLOT5_ROM_BASE + {9'd0, SLOT5_SIZE})) begin
+                sprite_rom_bram[SLOT5_BRAM_BASE + (ioctl_addr[15:0] - SLOT5_REL_BASE[15:0])] <= ioctl_dout;
+            end else if (ioctl_addr >= SLOT6_ROM_BASE && ioctl_addr < (SLOT6_ROM_BASE + {9'd0, SLOT6_SIZE})) begin
+                sprite_rom_bram[SLOT6_BRAM_BASE + (ioctl_addr[15:0] - SLOT6_REL_BASE[15:0])] <= ioctl_dout;
             end
         end
         sprite_bram_dout <= sprite_rom_bram[sprite_bram_addr];
@@ -247,17 +302,6 @@ module k007420 (
     reg [15:0] diag_ready_count;
     reg [7:0] sdram_timeout;
     reg sdram_ready_latched;
-    reg p3_ready_sticky;
-
-    always @(posedge clk) begin
-        if (reset) begin
-            p3_ready_sticky <= 1'b0;
-        end else if (state == 12 && !(last_byte_valid && calc_rom_addr == last_byte_addr) && calc_rom_addr >= 18'h10000) begin
-            p3_ready_sticky <= 1'b0; // Clear sticky flag ONLY when initiating a new SDRAM request
-        end else if (sprite_sdram_ready) begin
-            p3_ready_sticky <= 1'b1;
-        end
-    end
 
     always @(posedge clk) begin
         last_h_cnt_0 <= (h_cnt == 0);
@@ -346,7 +390,14 @@ module k007420 (
                 
                 5: begin // Evaluation State: all 6 OAM attributes are fully loaded!
                     pix_x <= 0;
-                    if (raw_y != 8'd0 && zoom_raw != 10'd0 && (spr_code_lsb != 8'd0 || spr_attr != 8'd0) && sprite_y_in_bounds) begin
+                    // (spr_code_lsb != 0 || spr_attr != 0) clause removed (2026-08-13):
+                    // MAME's real sprites_draw() (k007420_mame.cpp) has no code==0/color==0
+                    // skip -- it only skips on zoom==0. The clause was also redundant on its
+                    // own terms: an unused OAM slot already has raw_y==0 AND zoom==0, both
+                    // already checked here, so it added no real protection -- it only ever
+                    // incorrectly rejected a genuine, positioned, correctly-zoomed sprite
+                    // that happens to use tile 0 with attribute 0.
+                    if (raw_y != 8'd0 && zoom_raw != 10'd0 && sprite_y_in_bounds) begin
                         last_byte_valid <= 1'b0; // new sprite: invalidate cache, force a real fetch at pix_x=0
                         state <= 12; // Active scanline: proceed to rendering
                     end else begin
@@ -364,6 +415,44 @@ module k007420 (
                         // [1-CYCLE ZERO-LATENCY BRAM CACHE (64KB @ 0x00000 - 0x0FFFF)]:
                         // Serves 100% of Player, Bullets, Weapons, Fly Man, Baron, Shade, Gustaff, Goblin, Damage Shields, & Spined Devil:
                         sprite_bram_addr <= calc_rom_addr[15:0];
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT1_REL_BASE && calc_rom_addr < (SLOT1_REL_BASE + {2'd0, SLOT1_SIZE})) begin
+                        // Ogre/Goblin BRAM slot 1 (see the write-path comment above for
+                        // the full reasoning) -- confirmed-failing-via-SDRAM address
+                        // range, now served from the same reliable 1-cycle BRAM cache.
+                        sprite_bram_addr <= SLOT1_BRAM_BASE + (calc_rom_addr[15:0] - SLOT1_REL_BASE[15:0]);
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT2_REL_BASE && calc_rom_addr < (SLOT2_REL_BASE + {2'd0, SLOT2_SIZE})) begin
+                        // Ogre/Goblin BRAM slot 2, same reasoning as slot 1.
+                        sprite_bram_addr <= SLOT2_BRAM_BASE + (calc_rom_addr[15:0] - SLOT2_REL_BASE[15:0]);
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT3_REL_BASE && calc_rom_addr < (SLOT3_REL_BASE + {2'd0, SLOT3_SIZE})) begin
+                        // BRAM slot 3, second small-address failing cluster.
+                        sprite_bram_addr <= SLOT3_BRAM_BASE + (calc_rom_addr[15:0] - SLOT3_REL_BASE[15:0]);
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT4_REL_BASE && calc_rom_addr < (SLOT4_REL_BASE + {2'd0, SLOT4_SIZE})) begin
+                        // BRAM slot 4, third small-address failing cluster.
+                        sprite_bram_addr <= SLOT4_BRAM_BASE + (calc_rom_addr[15:0] - SLOT4_REL_BASE[15:0]);
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT5_REL_BASE && calc_rom_addr < (SLOT5_REL_BASE + {2'd0, SLOT5_SIZE})) begin
+                        // BRAM slot 5, Gargoyle portrait tile.
+                        sprite_bram_addr <= SLOT5_BRAM_BASE + (calc_rom_addr[15:0] - SLOT5_REL_BASE[15:0]);
+                        last_byte_addr <= calc_rom_addr;
+                        last_byte_valid <= 1'b1;
+                        state <= 13;
+                    end else if (calc_rom_addr >= SLOT6_REL_BASE && calc_rom_addr < (SLOT6_REL_BASE + {2'd0, SLOT6_SIZE})) begin
+                        // BRAM slot 6, Gargoyle portrait tile.
+                        sprite_bram_addr <= SLOT6_BRAM_BASE + (calc_rom_addr[15:0] - SLOT6_REL_BASE[15:0]);
                         last_byte_addr <= calc_rom_addr;
                         last_byte_valid <= 1'b1;
                         state <= 13;
@@ -400,7 +489,7 @@ module k007420 (
                     sprite_sdram_req <= 1'b0;
                     sdram_timeout <= sdram_timeout + 1'd1;
                     
-                    if (sprite_sdram_ready || p3_ready_sticky) begin
+                    if (sprite_sdram_ready) begin
                         latched_rom_byte <= sprite_sdram_dout;
                         sdram_ready_latched <= 1'b1;
                         diag_req_count <= diag_req_count + 1'd1;

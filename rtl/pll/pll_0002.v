@@ -10,6 +10,14 @@ module  pll_0002(
 	// interface 'outclk0'
 	output wire outclk_0,
 
+	// interface 'outclk1' (SDRAM_CLK source: same 48MHz, phase-shifted so the
+	// external SDRAM chip's clock edges arrive well ahead of clk_sys's own
+	// edges, maximizing read-data setup margin at the FPGA input register --
+	// see sdram.sv for why this replaced the internal altddio_out 180 deg
+	// shift, which had no SDC timing constraint and could route through
+	// general fabric with unpredictable added delay)
+	output wire outclk_1,
+
 	// interface 'locked'
 	output wire locked
 );
@@ -18,12 +26,31 @@ module  pll_0002(
 		.fractional_vco_multiplier("false"),
 		.reference_clock_frequency("50.0 MHz"),
 		.operation_mode("direct"),
-		.number_of_clocks(1),
+		.number_of_clocks(2),
 		.output_clock_frequency0("48.000000 MHz"),
 		.phase_shift0("0 ps"),
 		.duty_cycle0(50),
-		.output_clock_frequency1("0 MHz"),
-		.phase_shift1("0 ps"),
+		.output_clock_frequency1("48.000000 MHz"),
+		.phase_shift1("5208 ps"), // 90deg (2026-08-11): REVERTED -- 90deg is the optimal timing-closed configuration.
+		                          // tried 45deg (2604 ps)
+		                          // (Template.sdc, same session) and constraints correctly
+		                          // referencing SDRAM_CLK instead of a fragile manual clk_sys
+		                          // offset, TimeQuest could finally compute the REAL
+		                          // clk_sys-to-SDRAM_CLK cross-domain relationship for the
+		                          // first time -- and at 180deg it reported a genuine setup
+		                          // violation on clk_sys itself (-3.991ns slack, -60.475ns
+		                          // TNS, the MAIN system clock domain covering CPU/video/
+		                          // everything), which did not exist at 90deg. Confirms
+		                          // 180deg is too aggressive a shift for this design's real
+		                          // timing budget; reverted rather than risk deploying a
+		                          // build with a confirmed violation on the main clock.
+		                          // Earlier trials at both 90deg and 180deg (see below) were
+		                          // compiled without SDRAM_CLK being constrained at all, so
+		                          // neither was a real test of the phase amount itself.
+		                          // Confirmed via trial: altera_pll only accepts phase_shift in
+		                          // [0, half-period] for this parameter (17833 ps, past
+		                          // the half-period mark, was rejected outright), so
+		                          // trying a smaller shift within that confirmed range.
 		.duty_cycle1(50),
 		.output_clock_frequency2("0 MHz"),
 		.phase_shift2("0 ps"),
@@ -77,7 +104,7 @@ module  pll_0002(
 		.pll_subtype("General")
 	) altera_pll_i (
 		.rst	(rst),
-		.outclk	({outclk_0}),
+		.outclk	({outclk_1, outclk_0}),
 		.locked	(locked),
 		.fboutclk	( ),
 		.fbclk	(1'b0),
