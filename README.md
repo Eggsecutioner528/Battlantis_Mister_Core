@@ -14,7 +14,9 @@ arcade hardware.  However this work would not have been possible without Jotego'
 mainly thanks to his work on other cores and documentation.  I am deeply greatful
 for this information.
 
-This folder is a clean snapshot of the working tree as of **2026-08-08**,
+This folder is a clean snapshot of the working tree as of **2026-08-08**
+(RTL files below; see "Status" and "Known issues" for what's changed since
+in the active working tree, not yet re-synced here),
 containing only the files actually compiled into the core (audited against
 `Template.qsf` / `files.qip` and every module instantiation, not just copied
 wholesale). It follows on from the last prior commit,
@@ -51,15 +53,32 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 
 ## Known issues
 
-- **Upper-address sprites**: sprites served from the upper SDRAM-backed ROM
-  range (Gargoyle, Grimlock, Ogre wall-climb, Carriage, Red Dragon, stage
-  bosses) intermittently render as missing or as corrupted lines/streaks
-  instead of clean sprite art. Top priority open issue.
+- **Upper-address sprites (SDRAM Port 3)**: still the top-priority open issue,
+  but real progress since the 2026-08-08 snapshot. Found and fixed a genuine
+  arbiter race condition in `sdram_arbiter.sv` — `latched_pX_req` for Ports
+  1/2/3 was being cleared at request *dispatch* instead of transaction
+  *completion*, letting a continuously-held request line get spuriously
+  re-latched with a stale address mid-transaction and silently drop the
+  requester's real next request. Found via a cycle-accurate ModelSim
+  simulation, fixed, and confirmed on real hardware to have helped (a
+  previously fully-invisible enemy portrait now renders correctly). Not a
+  full fix, though: some sprites are still missing (Gustaff/Gargoyle on at
+  least one enemy-tally screen) even with real, non-corrupted SDRAM traffic
+  confirmed flowing during gameplay. A decisive follow-up test is in
+  progress: temporarily forcing *every* sprite fetch through SDRAM Port 3
+  (bypassing the 64KB BRAM cache entirely, including sprites known to render
+  perfectly from BRAM today) to determine once and for all whether Port 3
+  is fully trustworthy for real gameplay data, or still has a genuine
+  data-correctness bug independent of address range.
 - **Ogre 16×16 wall-climb static**: the Ogre's 8×8 wall-running form renders
   correctly, but its 16×16 wall-climb form progressively degrades into static
   as it climbs. Leading theory is SDRAM Port 3 bandwidth contention (16×16
   needs ~4x the byte-fetches of 8×8 per instance), unconfirmed. Likely related
   to the upper-address sprite issue above.
+- **Purple/magenta static corruption tied to the Dragon boss**: newly
+  observed this session on the Game Over / late-stage screen when the Dragon
+  boss appears. Not yet investigated — deprioritized in favor of the SDRAM
+  Port 3 work above, at the project owner's explicit direction.
 - **Sprite halo/outline artifact**: an unresolved visual artifact on some
   sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
   convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
