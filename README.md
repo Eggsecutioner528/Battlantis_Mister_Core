@@ -111,6 +111,3 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   core) directly.
 - `rtl/t80/T80pa.vhd` - an alternate T80 top-level wrapper not used; the
   design instantiates `T80s` only.
-
-SignalTap debug probes (`debug.stp`) were also stripped from `Template.qsf`
-for this clean build.
