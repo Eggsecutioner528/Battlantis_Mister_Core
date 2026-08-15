@@ -86,29 +86,14 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   but that access pattern -- one requester, mostly-sequential fills -- is the
   reliable case this testing already confirmed, not the isolated-jump case
   that failed.
-- **Ogre 16×16 wall-climb static, Gargoyle / tally-screen portraits**: were
-  fixed in an earlier snapshot via hand-patched BRAM slots for their specific
-  problem addresses; as of 2026-08-15 the entire sprite ROM is BRAM-resident
-  unconditionally, so these should remain fixed, but haven't been
-  individually re-confirmed since the architecture change (worth a targeted
-  re-check rather than assuming carry-over).
-- **Purple/magenta static on the Game Over / late-stage screen**: confirmed
-  to be an intentional visual effect of the original arcade hardware, not a
-  bug -- no fix needed.
 - **Sprite halo/outline artifact**: an unresolved visual artifact on some
   sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
   convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
   core was wrong. Battlantis's actual K007420 has no shadow feature
   (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) and was
   reverted. Needs fresh diagnosis grounded in K007420's real behavior.
-- **Spined Devil position**: reported incorrect on the green-void transition
-  screen; not yet root-caused.
 - **Sound** is wired in but not yet verified against real hardware.
-- **DIP switches** are wired to the OSD (including a 2026-08-14 fix for the
-  physical Test/Service button, previously tied off and unable to exit
-  service mode once entered) but have not been fully verified against
-  physical PCB behavior.
-
+- 
 ## Third-party cores
 
 - `rtl/mc6809/mc6809i.v` - Greg Miller's cycle-accurate MC6809 core. License:
@@ -119,10 +104,6 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   License: GPLv3, see `rtl/jtopl/LICENSE`.
 
 ## Notes on this file set
-
-This snapshot deliberately excludes two things that were found to be dead
-code during the audit for this commit, even though they were listed in the
-original `files.qip`/`Template.qsf`:
 
 - `rtl/jtkcpu/*` (Jotego's HD6309 core) and `rtl/mc6809/mc6809.v` (a wrapper
   module, `mc6809is`, adapting `jtkcpu` to the MC6809 interface) - neither is
