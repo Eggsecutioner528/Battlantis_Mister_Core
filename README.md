@@ -1,6 +1,10 @@
 # Battlantis - MiSTer FPGA Core
 
-This project was made with the assitance of Gemini and Claude.  This core is meant to be free and no one shall charge for thie core.  
+**Status: Pre-Alpha.**
+
+Author/creator: **Eggsecutioner**. This project was made with the assistance of
+Gemini and Claude. This core is meant to be free and no one shall charge for
+this core.
 
 This is a from-scratch Verilog/SystemVerilog reimplementation of the 1987 Konami arcade
 game **Battlantis** (Twin-16 hardware family: MC6809 main CPU, Z80 + dual
@@ -15,7 +19,7 @@ mainly thanks to his work on other cores and documentation.  I am deeply greatfu
 for this information.
 
 This folder is a clean snapshot of the working tree, most recently re-synced
-**2026-08-14** (containing only the files actually compiled into the core,
+**2026-08-15** (containing only the files actually compiled into the core,
 audited against `Template.qsf` / `files.qip` and every module instantiation,
 not just copied wholesale). The active working tree runs far ahead of this
 snapshot at any given time -- it accumulates diagnostic instrumentation and
@@ -24,6 +28,21 @@ machines, isolation tests) needed to actually find and confirm bugs, none of
 which belongs in a public release build. This snapshot is re-synced
 periodically by hand-porting only the specific, proven fixes out of that
 working tree, with all diagnostic scaffolding stripped back out.
+
+**2026-08-15 sync**: a full architecture change from the previous snapshot --
+both the background tilemap (`k007342.v`) and sprite engine (`k007420.v`)
+changed how they store ROM data. Sprites now hold their entire 256KB ROM
+statically in BRAM (previously a 64KB cache plus six hand-patched slots for
+specific problem addresses, falling back to SDRAM for everything else), which
+eliminated sprite SDRAM traffic entirely. That freed enough BRAM for
+backgrounds to move the other way: instead of a full 256KB local ROM copy, a
+64KB direct-mapped cache now serves tiles from BRAM and fills itself from
+SDRAM on a miss. This also fixed the actual root cause of the black-background
+bug from the previous snapshot: the SDRAM arbiter's reset was tied to a signal
+the MiSTer framework holds asserted for the entire ROM download (not just
+initial core bring-up, as commonly assumed), freezing the arbiter and
+silently blocking every SDRAM write during download -- backgrounds render
+correctly now that the arbiter's reset excludes the download window.
 
 ## Building
 
@@ -43,8 +62,8 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 | Subsystem | Status |
 |---|---|
 | MC6809 main CPU | Working - boots, runs game logic, RAM test passes |
-| K007342 tilemap (backgrounds, text, scroll) | Working - title screen scrolling and tile ROM addressing fixed |
-| K007420 sprites | Working for the large majority of sprites/sizes; significantly improved 2026-08-14 (BRAM cache reallocation, size-code fix); see known issues |
+| K007342 tilemap (backgrounds, text, scroll) | Working - full 256KB tile ROM served via a 64KB SDRAM-backed cache; backgrounds confirmed rendering correctly on real hardware 2026-08-15 (see the sync note above) |
+| K007420 sprites | Working for the large majority of sprites/sizes -- entire 256KB sprite ROM now held statically in BRAM (2026-08-15), eliminating SDRAM sprite traffic entirely; see known issues for remaining per-sprite bugs |
 | Palette RAM | Working - sprite palette bank bug fixed and confirmed on hardware |
 | Screen rotation / OSD | Working - Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
 | DIP switches | Wired up (Coinage, Lives, Difficulty, Bonus Life, Demo Sounds, Cabinet, Flip Screen, Upright Controls, Mode, Continues) per the owner's manual and MAME source; not yet verified against a physical PCB |
@@ -52,34 +71,27 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 
 ## Known issues
 
-- **SDRAM Port 3 reliability for isolated/random-jump sprite fetches**: the
-  root architectural constraint behind most sprite issues below. Extensive
-  testing (ModelSim simulation with a real Micron SDRAM behavioral model,
-  plus controlled hardware A/B tests) proved this is a genuine, repeatable
-  hardware access-pattern limitation, not a logic bug: fully sequential
-  SDRAM access (e.g. a full linear sweep) is 100% reliable, but isolated,
-  randomly-jumping single-byte reads -- exactly how sprite fetching works,
-  hopping between OAM slots and ROM addresses every frame -- fail
-  essentially 100% of the time on this hardware/timing configuration. The
-  practical mitigation implemented here is a BRAM cache: sprites needing
-  addresses outside the primary 64KB BRAM window are served from six
-  additional small BRAM "slots" mapped to specific known-problem address
-  ranges (Ogre/Goblin's wall-climb and running tiles, Gargoyle's
-  tally-screen portrait including its second animation frame) rather than
-  through SDRAM at all. This resolved every sprite listed as fixed below,
-  but is inherently a per-address patch, not a general fix -- any
-  not-yet-covered address range remains subject to the same underlying
-  limitation. A from-scratch architectural fix (moving background tilemap
-  data to SDRAM, where its access pattern is closer to the reliable
-  sequential case, and freeing the reclaimed BRAM to expand sprite
-  coverage) is under active investigation in the working tree, not yet
-  ready to sync here.
-- **Ogre 16×16 wall-climb static**: fixed 2026-08-14 via the BRAM cache
-  slot reallocation above.
-- **Gargoyle / tally-screen portraits**: significantly improved via the same
-  BRAM slot reallocation (both of Gargoyle's animation frames now render),
-  but coverage isn't exhaustive across every sprite/address in this family --
-  report any that still fail to render.
+- **SDRAM Port 3 reliability for isolated/random-jump sprite fetches**: this
+  was the root architectural constraint behind most sprite issues in earlier
+  snapshots -- extensive testing (ModelSim simulation with a real Micron
+  SDRAM behavioral model, plus controlled hardware A/B tests) proved
+  isolated, randomly-jumping single-byte SDRAM reads (exactly how sprite
+  fetching worked, hopping between OAM slots and ROM addresses every frame)
+  fail essentially 100% of the time on this hardware/timing configuration,
+  while fully sequential access is 100% reliable. **Resolved architecturally
+  as of 2026-08-15**, not patched: the sprite engine now holds its entire
+  256KB ROM statically in BRAM (see the sync note above) and never touches
+  SDRAM at all, so this class of failure no longer applies to sprites.
+  Backgrounds now use SDRAM instead (a 64KB tile cache, filled on a miss),
+  but that access pattern -- one requester, mostly-sequential fills -- is the
+  reliable case this testing already confirmed, not the isolated-jump case
+  that failed.
+- **Ogre 16×16 wall-climb static, Gargoyle / tally-screen portraits**: were
+  fixed in an earlier snapshot via hand-patched BRAM slots for their specific
+  problem addresses; as of 2026-08-15 the entire sprite ROM is BRAM-resident
+  unconditionally, so these should remain fixed, but haven't been
+  individually re-confirmed since the architecture change (worth a targeted
+  re-check rather than assuming carry-over).
 - **Purple/magenta static on the Game Over / late-stage screen**: confirmed
   to be an intentional visual effect of the original arcade hardware, not a
   bug -- no fix needed.

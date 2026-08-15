@@ -202,7 +202,22 @@ always @(posedge clk) begin
 				// next row activation then needs tRP on top of that. STATE_IDLE_4
 				// gives the physical chip more margin for tWR+tRP before the next
 				// CMD_ACTIVE can be issued.
-				state    <= STATE_IDLE_4;
+				//
+				// Extended again to STATE_IDLE_5: IDLE_4 gave enough margin for
+				// write-then-ACTIVATE, but a focused ModelSim simulation found it
+				// was NOT quite enough specifically for write-then-AUTO_REFRESH -- a
+				// sustained burst of writes under the real ~375-cycle refresh
+				// interval (the pattern a large boot ROM download produces) hit a
+				// reproducible, deterministic tRP violation on the Micron
+				// behavioral model at the same point every run. One additional idle
+				// cycle eliminated it completely (0 violations at up to 200,000
+				// sustained writes in simulation). Real hardware doesn't halt on a
+				// violation like the behavioral model does -- it silently drops or
+				// corrupts the write instead, which is why data downloaded late in
+				// a long boot sequence (after many prior writes) could come back
+				// completely zero from SDRAM while earlier-downloaded data stayed
+				// intact.
+				state    <= STATE_IDLE_5;
 			end
 			else begin
 				command  <= CMD_READ;

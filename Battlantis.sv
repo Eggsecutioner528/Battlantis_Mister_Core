@@ -187,20 +187,28 @@ sdram sdram_inst (
     wire [7:0] cpu_sdram_dout_raw;
     wire cpu_sdram_ready;
 
-    wire tile_sdram_req = 1'b0;
-    wire [24:0] tile_sdram_addr = 25'd0;
+    wire tile_sdram_req;
+    wire [24:0] tile_sdram_addr;
     wire [7:0] tile_sdram_dout;
     wire tile_sdram_ready;
 
-    wire sprite_sdram_req;
-    wire [24:0] sprite_sdram_addr;
-    wire [7:0] sprite_sdram_dout;
-    wire sprite_sdram_ready;
-
 wire p0_ready;
+// The SDRAM arbiter's reset must NOT simply be sys_reset: the MiSTer
+// framework holds its RESET output asserted for the entire ioctl_download
+// window (not just initial core bring-up, as commonly assumed), and
+// sys_reset includes RESET directly. Gating the arbiter's reset on bare
+// sys_reset held it frozen for the whole ROM download, so it never
+// processed a single write to SDRAM -- background tile data (which lives in
+// SDRAM, see k007342.v's tile cache) was never written at all, producing
+// permanently black backgrounds despite the download itself completing
+// successfully. A real hardware/OSD/joystick reset still resets the
+// arbiter via sys_reset; only the download window itself can no longer
+// hold it in reset.
+wire sdram_reset = sys_reset & ~ioctl_download;
+
 sdram_arbiter arbiter (
     .clk(clk_sys),
-    .reset(sys_reset),
+    .reset(sdram_reset),
 
     // Port 0: IOCTL (Write Only)
     .p0_req(ioctl_download & ioctl_wr),
@@ -215,17 +223,18 @@ sdram_arbiter arbiter (
     .p1_dout(cpu_sdram_dout_raw),
     .p1_ready(cpu_sdram_ready),
 
-    // Port 2: Tilemap (Unused - Available)
+    // Port 2: Tilemap -- on-demand background tile cache fills (k007342.v)
     .p2_req(tile_sdram_req),
     .p2_addr(tile_sdram_addr),
     .p2_dout(tile_sdram_dout),
     .p2_ready(tile_sdram_ready),
 
-    // Port 3: Sprites (Unused - Available)
-    .p3_req(sprite_sdram_req),
-    .p3_addr(sprite_sdram_addr),
-    .p3_dout(sprite_sdram_dout),
-    .p3_ready(sprite_sdram_ready),
+    // Port 3: unused -- the sprite engine (k007420.v) holds its entire ROM
+    // statically in BRAM and never needs SDRAM.
+    .p3_req(1'b0),
+    .p3_addr(25'd0),
+    .p3_dout(),
+    .p3_ready(),
 
     // SDRAM Controller Interface
     .sdram_addr(sdram_addr_in),
@@ -378,10 +387,15 @@ k007342 k007342_inst (
     .ioctl_wr(ioctl_download & ioctl_wr),
     .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout),
-    
+
     .irq(k007342_irq),
     .irq_ack(k007342_irq_ack),
-    .pixel_color(k007342_pixel)
+    .pixel_color(k007342_pixel),
+
+    .tile_sdram_req(tile_sdram_req),
+    .tile_sdram_addr(tile_sdram_addr),
+    .tile_sdram_dout(tile_sdram_dout),
+    .tile_sdram_ready(tile_sdram_ready)
 );
 
 // ==============================================================================
@@ -398,39 +412,27 @@ wire k007420_re = cpu_rw == 1'b1 && (cpu_addr >= 16'h2000 && cpu_addr <= 16'h21F
 
 
 
-wire [15:0] sprite_diag_req_count;
-wire [15:0] sprite_diag_ready_count;
-
 k007420 sprite_gen (
     .clk(clk_sys),
     .reset(reset),
-    
+
     .spritebank(sprite_bank), // Pass sprite_bank to k007420
-    
+
     .cpu_addr(cpu_addr[8:0]),
     .cpu_din(cpu_dout),
     .cpu_dout(k007420_dout),
     .cpu_we(k007420_we),
-    
+
     .ce_pix(ce_pix),
     .h_cnt(h_cnt[8:0]),
     .v_cnt(v_cnt[8:0]),
-    
+
     .ioctl_wr(ioctl_download & ioctl_wr),
     .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout),
-    
+
     .sprite_color(k007420_pixel),
-    .sprite_active(k007420_active),
-    
-    .sprite_sdram_req(sprite_sdram_req),
-    .sprite_sdram_addr(sprite_sdram_addr),
-    .sprite_sdram_dout(sprite_sdram_dout),
-    .sprite_sdram_ready(sprite_sdram_ready),
-    
-    .diag_sdram_req_count(sprite_diag_req_count),
-    .diag_sdram_ready_count(sprite_diag_ready_count),
-    .has_non_zero_rom_out(sprite_has_non_zero_rom)
+    .sprite_active(k007420_active)
 );
 
 // ==============================================================================
@@ -748,12 +750,18 @@ arcade_video #(256, 24) arcade_video (
       if (k007420_we) oam_write_flag <= 1'b1;
   end
 
+  // Tile cache fill activity: LED_DISK[0] toggles on every real Port 2
+  // request (a cache miss triggering an SDRAM fill byte), LED_DISK[1] on
+  // every ready response -- both blinking together in normal play confirms
+  // the fill handshake is alive.
+  reg [8:0] tile_fill_req_count, tile_fill_ready_count;
+  always @(posedge clk_sys) begin
+      if (tile_sdram_req)   tile_fill_req_count   <= tile_fill_req_count + 1'd1;
+      if (tile_sdram_ready) tile_fill_ready_count <= tile_fill_ready_count + 1'd1;
+  end
+
   assign LED_USER  = cpu_heartbeat[18]; // Blinks if CPU is running
   assign LED_POWER = 0;
-  // SDRAM DIAGNOSTIC LEDs:
-  // LED_DISK[0] = blinks if SDRAM requests are being issued (req_count > 0)
-  // LED_DISK[1] = blinks if SDRAM ready responses arrive (ready_count > 0)
-  // Both ON = handshake works. Only [0] ON = state machine stalls in state 14.
-  assign LED_DISK  = {sprite_diag_ready_count[8], sprite_diag_req_count[8]};
+  assign LED_DISK  = {tile_fill_ready_count[8], tile_fill_req_count[8]};
 
 endmodule
