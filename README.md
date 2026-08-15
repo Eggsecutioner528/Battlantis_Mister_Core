@@ -93,7 +93,7 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) and was
   reverted. Needs fresh diagnosis grounded in K007420's real behavior.
 - **Sound** is wired in but not yet verified against real hardware.
-- 
+   
 ## Third-party cores
 
 - `rtl/mc6809/mc6809i.v` - Greg Miller's cycle-accurate MC6809 core. License:
