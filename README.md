@@ -19,7 +19,7 @@ mainly thanks to his work on other cores and documentation.  I am deeply greatfu
 for this information.
 
 This folder is a clean snapshot of the working tree, most recently re-synced
-**2026-08-15** (containing only the files actually compiled into the core,
+**2026-08-16** (containing only the files actually compiled into the core,
 audited against `Template.qsf` / `files.qip` and every module instantiation,
 not just copied wholesale). The active working tree runs far ahead of this
 snapshot at any given time -- it accumulates diagnostic instrumentation and
@@ -28,6 +28,24 @@ machines, isolation tests) needed to actually find and confirm bugs, none of
 which belongs in a public release build. This snapshot is re-synced
 periodically by hand-porting only the specific, proven fixes out of that
 working tree, with all diagnostic scaffolding stripped back out.
+
+**2026-08-16 sync -- major milestone**: with a boot-time hang found and fixed
+(a video timing change had an unresolved side effect; reverted to the prior,
+confirmed-working value pending further investigation), the core could
+finally be played through for the first time in a while, surfacing and
+confirming two significant fixes: (1) a K007342 sprite Y-wrap register
+(0x02 bit 7) was completely unimplemented, causing a full-screen-height
+duplicate "shadow" on some sprites -- implemented and confirmed fixed on
+hardware. (2) A one-cycle-early BRAM read in the sprite fetch pipeline was
+producing shear/ghosting specifically during sprite zoom transitions,
+including visible seams between the separate pieces that make up composite
+multi-sprite bosses (e.g. the Red Dragon) -- fixed by correcting the tile
+boundary math to match MAME's real per-tile rounding exactly (see
+`rtl/tile_bound1-4.hex`, replacing the previous single flat reciprocal
+table). Both fixes are confirmed on real hardware; the previously-listed
+"sprite halo/outline artifact" and "Red Dragon" known issues below are
+resolved as of this sync. **Sound was also directly tested for the first
+time this sync and is confirmed NOT working** -- see Known Issues.
 
 **2026-08-15 sync**: a full architecture change from the previous snapshot --
 both the background tilemap (`k007342.v`) and sprite engine (`k007420.v`)
@@ -67,7 +85,7 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 | Palette RAM | Working - sprite palette bank bug fixed and confirmed on hardware |
 | Screen rotation / OSD | Working - Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
 | DIP switches | Wired up (Coinage, Lives, Difficulty, Bonus Life, Demo Sounds, Cabinet, Flip Screen, Upright Controls, Mode, Continues) per the owner's manual and MAME source; not yet verified against a physical PCB |
-| Sound (Z80 + dual YM3812) | Wired into `Battlantis.sv`; not yet verified on real hardware |
+| Sound (Z80 + dual YM3812) | **Confirmed NOT working on real hardware (2026-08-16): complete silence.** Diagnostic testing pinpointed the sound ROM's IOCTL download write strobe as never firing -- the Z80 sound CPU has no program to execute. Root cause not yet found (module wiring and address-range math both check out on inspection); a live diagnostic to trace the actual IOCTL address stream during download is the next step. See Known Issues. |
 
 ## Known issues
 
@@ -95,15 +113,28 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 - **Purple/magenta static on the Game Over / late-stage screen**: confirmed
   to be an intentional visual effect of the original arcade hardware, not a
   bug -- no fix needed.
-- **Sprite halo/outline artifact**: an unresolved visual artifact on some
-  sprites. An earlier attempt to explain this by borrowing a "shadow pixel"
-  convention from Jotego's unrelated Twin-16 (`007779/007781/007783`) colmix
-  core was wrong. Battlantis's actual K007420 has no shadow feature
-  (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`) and was
-  reverted. Needs fresh diagnosis grounded in K007420's real behavior.
+- **Sprite halo/outline artifact -- RESOLVED 2026-08-16.** Two real, separate
+  causes, both fixed and confirmed on hardware: a completely unimplemented
+  K007342 sprite Y-wrap register (0x02 bit 7), and a one-cycle-early BRAM
+  read in the sprite fetch pipeline causing shear/ghosting specifically
+  during zoom transitions (which also produced visible seams in composite
+  multi-piece bosses like the Red Dragon, separately confirmed fixed).
+  Battlantis's actual K007420 still has no dedicated "shadow" hardware
+  feature (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`)
+  -- an earlier theory borrowing that convention from Jotego's unrelated
+  Twin-16 (`007779/007781/007783`) colmix core remains correctly reverted.
 - **Spined Devil position**: reported incorrect on the green-void transition
   screen; not yet root-caused.
-- **Sound** is wired in but not yet verified against real hardware.
+- **Sound: confirmed NOT working (2026-08-16), complete silence.** The
+  clock-rate correctness of the Z80/YM3812 clocks was fixed first (and is
+  believed correct), but that turned out not to be the actual problem --
+  live diagnostic testing during real gameplay showed the sound ROM's
+  IOCTL download write strobe never fires at all, meaning the Z80 sound
+  CPU never receives a real program. The module wiring in
+  `rtl/battlantis_sound.v` and the IOCTL address-range math in
+  `Battlantis.sv` both look correct on static inspection; the actual
+  IOCTL address stream during download needs to be traced live to find
+  where the sound ROM's region is being missed. Not yet root-caused.
 - **DIP switches** are wired to the OSD (including a 2026-08-14 fix for the
   physical Test/Service button, previously tied off and unable to exit
   service mode once entered) but have not been fully verified against
