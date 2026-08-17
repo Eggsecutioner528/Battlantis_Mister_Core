@@ -104,15 +104,6 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   but that access pattern -- one requester, mostly-sequential fills -- is the
   reliable case this testing already confirmed, not the isolated-jump case
   that failed.
-- **Ogre 16×16 wall-climb static, Gargoyle / tally-screen portraits**: were
-  fixed in an earlier snapshot via hand-patched BRAM slots for their specific
-  problem addresses; as of 2026-08-15 the entire sprite ROM is BRAM-resident
-  unconditionally, so these should remain fixed, but haven't been
-  individually re-confirmed since the architecture change (worth a targeted
-  re-check rather than assuming carry-over).
-- **Purple/magenta static on the Game Over / late-stage screen**: confirmed
-  to be an intentional visual effect of the original arcade hardware, not a
-  bug -- no fix needed.
 - **Sprite halo/outline artifact -- RESOLVED 2026-08-16.** Two real, separate
   causes, both fixed and confirmed on hardware: a completely unimplemented
   K007342 sprite Y-wrap register (0x02 bit 7), and a one-cycle-early BRAM
@@ -123,8 +114,6 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   feature (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`)
   -- an earlier theory borrowing that convention from Jotego's unrelated
   Twin-16 (`007779/007781/007783`) colmix core remains correctly reverted.
-- **Spined Devil position**: reported incorrect on the green-void transition
-  screen; not yet root-caused.
 - **Sound: confirmed NOT working (2026-08-16), complete silence.** The
   clock-rate correctness of the Z80/YM3812 clocks was fixed first (and is
   believed correct), but that turned out not to be the actual problem --
@@ -135,10 +124,6 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
   `Battlantis.sv` both look correct on static inspection; the actual
   IOCTL address stream during download needs to be traced live to find
   where the sound ROM's region is being missed. Not yet root-caused.
-- **DIP switches** are wired to the OSD (including a 2026-08-14 fix for the
-  physical Test/Service button, previously tied off and unable to exit
-  service mode once entered) but have not been fully verified against
-  physical PCB behavior.
 
 ## Third-party cores
 
@@ -151,16 +136,9 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 
 ## Notes on this file set
 
-This snapshot deliberately excludes two things that were found to be dead
-code during the audit for this commit, even though they were listed in the
-original `files.qip`/`Template.qsf`:
-
 - `rtl/jtkcpu/*` (Jotego's HD6309 core) and `rtl/mc6809/mc6809.v` (a wrapper
   module, `mc6809is`, adapting `jtkcpu` to the MC6809 interface) - neither is
   ever instantiated by `Battlantis.sv`, which uses `mc6809i` (Greg Miller's
   core) directly.
 - `rtl/t80/T80pa.vhd` - an alternate T80 top-level wrapper not used; the
   design instantiates `T80s` only.
-
-SignalTap debug probes (`debug.stp`) were also stripped from `Template.qsf`
-for this clean build.
