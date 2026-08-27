@@ -1,7 +1,8 @@
 db
 greybox_tmp
 incremental_db
-output_files
+output_files/*
+!output_files/Battlantis.rbf
 simulation
 hc_output
 scaler
