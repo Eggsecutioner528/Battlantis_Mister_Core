@@ -1,6 +1,9 @@
 # Battlantis - MiSTer FPGA Core
 
-**Status: Pre-Alpha.**
+**Status: Beta.** Fully playable on real hardware -- video, sound, and
+input are all confirmed working. See the Status table below for the
+full subsystem breakdown and the **2026-08-27 sync** note for what
+changed to reach this point.
 
 Author/creator: **Eggsecutioner**. This project was made with the assistance of
 Gemini and Claude. This core is meant to be free and no one shall charge for
@@ -28,6 +31,37 @@ machines, isolation tests) needed to actually find and confirm bugs, none of
 which belongs in a public release build. This snapshot is re-synced
 periodically by hand-porting only the specific, proven fixes out of that
 working tree, with all diagnostic scaffolding stripped back out.
+
+**2026-08-27 sync -- Beta.** The core is now fully playable end-to-end on
+real hardware. Highlights since the last sync:
+- **Sound fully fixed** (Task #8, closed): a one-cycle-early timing bug in
+  the third-party `jtopl` OPL2 core's envelope-generator persistent-storage
+  delay lines, plus an earlier T80 core accumulator register-grouping bug
+  that had been silently blocking the sound CPU from booting at all.
+  Confirmed by direct listening test on real hardware.
+- **Stage 1 speed fixed** (Task #15, closed): the game played roughly
+  36-38% too slow compared to real PCB reference footage. Root cause: the
+  6809's `LEAX -1,X`-style instructions leave `$FFFF` on the address bus
+  during their internal-arithmetic cycle (real, documented 6809 behavior),
+  which this core's IRQ-acknowledge logic was mistaking for a genuine
+  interrupt-vector fetch and silently acking real vblank interrupts before
+  the CPU could service them. Fixed by wiring the CPU's real `BS`/`BA`
+  (Bus Status/Bus Available) signals and using the genuine hardware
+  acknowledge condition instead. Confirmed on real hardware: the residual
+  timing gap versus reference footage is now within ~0.06%.
+- **DIP switches verified against the real owner's manual** (Task #9):
+  found and fixed a real discrepancy in one DIP's fresh-boot default value
+  that had been wrong on 4 of 5 fields.
+- A tile-cache aliasing bug (Task #25) and a K007342 "32 columns" scroll
+  mode register (Task #18) were also found and fixed.
+- OSD menu reordered for a more logical layout; the non-functional "Flip
+  Screen" option (confirmed on hardware to do nothing) was removed.
+- Two additional real ROM revisions added: World version F and Japan
+  version E, alongside the existing World version G -- see "Installing
+  ROMs" below.
+- A significant dead-code cleanup pass removed ~75 leftover diagnostic
+  signals plus 101 files/~20,800 lines of unreferenced third-party
+  scaffolding that never compiled into the core in the first place.
 
 **2026-08-16 sync -- major milestone**: with a boot-time hang found and fixed
 (a video timing change had an unresolved side effect; reverted to the prior,
@@ -62,6 +96,31 @@ initial core bring-up, as commonly assumed), freezing the arbiter and
 silently blocking every SDRAM write during download -- backgrounds render
 correctly now that the arbiter's reset excludes the download window.
 
+## Installing ROMs
+
+This repo ships the compiled core (`output_files/Battlantis.rbf`) and the
+`.mra` files, but **not the arcade ROM dump itself** -- Battlantis is
+Konami's copyrighted game data, and redistributing it isn't something
+this project does, in line with every other MiSTer core. You'll need to
+legally obtain your own dump and package it yourself:
+
+1. Get a `battlnts.zip` (MAME romset name) containing (at minimum) the
+   World version G set: `777_g02.7e`, `777_g03.8e`, `777_c01.10a`,
+   `777c04.13a`, `777c05.13e`.
+2. For the World version F or Japan version E variants (optional --
+   `Battlantis (version F).mra` / `Battlantis (Japan).mra`), add
+   `battlntsa/777_f02.7e` + `battlntsa/777_f03.8e`, or
+   `battlntsj/777_e02.7e` + `battlntsj/777_e03.8e`, into the same zip
+   under those subfolder names (standard MAME clone-set layout -- the
+   sound/tile/sprite ROMs are byte-identical across all three revisions
+   and only need to exist once at the zip's top level).
+3. Copy `battlnts.zip` to your MiSTer's ROM search path for this core
+   (typically `games/Battlantis/` -- MiSTer resolves this from more than
+   one folder depending on your setup, so check where your other arcade
+   ROMs already live if this path doesn't work).
+4. Copy `Battlantis.rbf` to `/media/fat/_Arcade/cores/` and the `.mra`
+   file(s) you want to `/media/fat/_Arcade/` on the MiSTer's SD card.
+
 ## Building
 
 Requires Quartus Prime 17.0.x (Lite is fine) targeting Cyclone V
@@ -79,51 +138,39 @@ default MiSTer credentials are `root` / `1`). If you wish for `build_and_deploy.
 
 | Subsystem | Status |
 |---|---|
-| MC6809 main CPU | Working - boots, runs game logic, RAM test passes |
-| K007342 tilemap (backgrounds, text, scroll) | Working - full 256KB tile ROM served via a 64KB SDRAM-backed cache; backgrounds confirmed rendering correctly on real hardware 2026-08-15 (see the sync note above) |
-| K007420 sprites | Working for the large majority of sprites/sizes -- entire 256KB sprite ROM now held statically in BRAM (2026-08-15), eliminating SDRAM sprite traffic entirely; see known issues for remaining per-sprite bugs |
-| Palette RAM | Working - sprite palette bank bug fixed and confirmed on hardware |
-| Screen rotation / OSD | Working - Orientation, Flip Monitor, and aspect ratio confirmed correct on hardware (MisterCade-style cabinet) |
-| DIP switches | Wired up (Coinage, Lives, Difficulty, Bonus Life, Demo Sounds, Cabinet, Flip Screen, Upright Controls, Mode, Continues) per the owner's manual and MAME source; not yet verified against a physical PCB |
-| Sound (Z80 + dual YM3812) | **Confirmed NOT working on real hardware (2026-08-16): complete silence.** Diagnostic testing pinpointed the sound ROM's IOCTL download write strobe as never firing -- the Z80 sound CPU has no program to execute. Root cause not yet found (module wiring and address-range math both check out on inspection); a live diagnostic to trace the actual IOCTL address stream during download is the next step. See Known Issues. |
+| MC6809 main CPU | Working -- boots, runs game logic, real BS/BA-based interrupt handling (Task #15) |
+| K007342 tilemap (backgrounds, text, scroll) | Working -- 256KB tile ROM served via a 64KB SDRAM-backed cache; a tile-cache aliasing bug (Task #25) and the "32 columns" scroll mode register (Task #18) have both been found and fixed |
+| K007420 sprites | Working -- entire 256KB sprite ROM held statically in BRAM, no SDRAM sprite traffic |
+| Palette RAM | Working |
+| Screen rotation / OSD | Working -- Orientation, Flip Monitor, and Aspect Ratio confirmed correct on hardware (MiSTerCade-style rotated cabinet monitor). Direct Video (CRT via the Analog IO board) is Portrait-only by design; see the project's task history for why a non-rotated-CRT Landscape mode isn't feasible on this FPGA's available on-chip RAM. |
+| DIP switches | Verified against the real Konami owner's manual (Task #9) -- found and fixed a real default-value bug affecting 4 of 5 fields on one DIP |
+| Sound (Z80 + dual YM3812) | **Working, confirmed by listening test on real hardware (Task #8).** Root cause of the earlier silence was a T80 core accumulator register-grouping bug plus a one-cycle envelope-timing bug in the third-party `jtopl` OPL2 core |
+| Regional ROM revisions | World version G (default), World version F, and Japan version E all supported -- see "Installing ROMs" |
 
 ## Known issues
 
-- **SDRAM Port 3 reliability for isolated/random-jump sprite fetches**: this
-  was the root architectural constraint behind most sprite issues in earlier
-  snapshots -- extensive testing (ModelSim simulation with a real Micron
-  SDRAM behavioral model, plus controlled hardware A/B tests) proved
-  isolated, randomly-jumping single-byte SDRAM reads (exactly how sprite
-  fetching worked, hopping between OAM slots and ROM addresses every frame)
-  fail essentially 100% of the time on this hardware/timing configuration,
-  while fully sequential access is 100% reliable. **Resolved architecturally
-  as of 2026-08-15**, not patched: the sprite engine now holds its entire
-  256KB ROM statically in BRAM (see the sync note above) and never touches
-  SDRAM at all, so this class of failure no longer applies to sprites.
-  Backgrounds now use SDRAM instead (a 64KB tile cache, filled on a miss),
-  but that access pattern -- one requester, mostly-sequential fills -- is the
-  reliable case this testing already confirmed, not the isolated-jump case
-  that failed.
-- **Sprite halo/outline artifact -- RESOLVED 2026-08-16.** Two real, separate
-  causes, both fixed and confirmed on hardware: a completely unimplemented
-  K007342 sprite Y-wrap register (0x02 bit 7), and a one-cycle-early BRAM
-  read in the sprite fetch pipeline causing shear/ghosting specifically
-  during zoom transitions (which also produced visible seams in composite
-  multi-piece bosses like the Red Dragon, separately confirmed fixed).
-  Battlantis's actual K007420 still has no dedicated "shadow" hardware
-  feature (`k007420.cpp` only ever uses plain `transpen`/`zoom_transpen`)
-  -- an earlier theory borrowing that convention from Jotego's unrelated
-  Twin-16 (`007779/007781/007783`) colmix core remains correctly reverted.
-- **Sound: confirmed NOT working (2026-08-16), complete silence.** The
-  clock-rate correctness of the Z80/YM3812 clocks was fixed first (and is
-  believed correct), but that turned out not to be the actual problem --
-  live diagnostic testing during real gameplay showed the sound ROM's
-  IOCTL download write strobe never fires at all, meaning the Z80 sound
-  CPU never receives a real program. The module wiring in
-  `rtl/battlantis_sound.v` and the IOCTL address-range math in
-  `Battlantis.sv` both look correct on static inspection; the actual
-  IOCTL address stream during download needs to be traced live to find
-  where the sound ROM's region is being missed. Not yet root-caused.
+- **Stage 1 timing residual gap**: after the Task #15 interrupt-ack fix,
+  the core's steady-state vblank-service rate is 99.94% (vs. real
+  hardware's effective ~100%) -- close enough that the user could not
+  perceive any difference from real PCB reference footage in direct A/B
+  testing, but not mathematically identical. Closing the remaining
+  0.06% is left for community/further review.
+- **Direct Video is Portrait-only**: the CRT connected via the Analog IO
+  board (Direct Video mode) bypasses the DDR3 framebuffer/scaler
+  entirely by design, so there's no framebuffer available to rotate for
+  a Landscape/non-rotated-CRT setup. A dedicated on-chip frame buffer for
+  this was scoped but found infeasible -- this FPGA's design already
+  uses 100% of its on-chip RAM blocks. Landscape/non-rotated-CRT users
+  should use the existing Orientation/Flip Monitor/Aspect Ratio OSD
+  options via scaled VGA/HDMI output instead.
+- **Palette RAM addressing question, not yet resolved**: the display
+  read path only forms a 9-bit palette index into a 1024-entry palette
+  RAM array that the CPU can write with a full 10-bit address, meaning
+  entries 512-1023 are writable but never displayed. Flagged during a
+  code-cleanup pass as a genuine open functional question (is this
+  correct real-hardware behavior, or a bug?) rather than something
+  patched blindly -- needs checking against real K007342 documentation
+  or hardware before any change.
 
 ## Third-party cores
 
