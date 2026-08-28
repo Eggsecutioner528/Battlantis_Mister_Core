@@ -156,6 +156,25 @@ ready-to-deploy Beta build.
 | DIP switches | Verified against the real Konami owner's manual (Task #9), which found and fixed a real default-value bug affecting 4 of 5 fields on one DIP |
 | Sound (Z80 + dual YM3812) | **Working, confirmed by listening test on real hardware (Task #8).** Root cause of the earlier silence was a T80 core accumulator register-grouping bug plus a one-cycle envelope-timing bug in the third-party `jtopl` OPL2 core |
 | Regional ROM revisions | World version G (default), World version F, and Japan version E all supported. See "Installing ROMs" |
+| OSD Test/Game mode | Switching this option triggers an automatic game reset, so the board boots cleanly into whichever mode was just selected instead of changing the DIP mid-run |
+
+## Planned
+
+- **In-core, live region selector**: right now, switching between the
+  World/World (version F)/Japan ROM revisions means picking a different
+  `.mra` entry from the MiSTer's own Arcade menu (see "Installing ROMs").
+  A true in-core OSD option that switches revisions live and resets the
+  game, without leaving the running core, is planned but not yet done:
+  the chip is already at 100% of its physical on-chip RAM blocks, so all
+  three ROM revisions can't just be held statically in BRAM the way the
+  CPU ROM is today. The real path is converting the CPU ROM from a
+  static BRAM copy into an SDRAM-backed cache holding all three
+  revisions, the same pattern already proven on the tilemap engine. That
+  is a real, working pattern on this hardware, not a dead end, but the
+  CPU ROM is currently the one subsystem with zero-wait-state
+  guarantees, which is exactly what the Task #15 timing fix relies on,
+  so this needs careful re-verification on real hardware before it can
+  be called done, not just a quick patch.
 
 ## Known issues
 
