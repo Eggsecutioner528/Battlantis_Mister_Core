@@ -108,12 +108,19 @@ legally obtain your own dump and package it yourself:
    World version G set: `777_g02.7e`, `777_g03.8e`, `777_c01.10a`,
    `777c04.13a`, `777c05.13e`.
 2. For the World version F or Japan version E variants (optional,
-   `Battlantis (version F).mra` / `Battlantis (Japan).mra`), add
+   `Battlantis (World).mra` / `Battlantis (Japan).mra`), add
    `battlntsa/777_f02.7e` + `battlntsa/777_f03.8e`, or
    `battlntsj/777_e02.7e` + `battlntsj/777_e03.8e`, into the same zip
    under those subfolder names (standard MAME clone-set layout, since
    the sound/tile/sprite ROMs are byte-identical across all three
    revisions and only need to exist once at the zip's top level).
+   Once the zip is in place, pick which revision to play from the
+   MiSTer's Arcade menu itself: `Battlantis.mra` (World, version G,
+   default), `Battlantis (World).mra` (World, version F, confirmed by
+   an embedded "WELCOME TO GX777 WORLD" splash string in its ROM that
+   version G lacks), and `Battlantis (Japan).mra` all appear as
+   separate entries there, each launching the same core with a
+   different ROM revision loaded.
 3. Copy `battlnts.zip` to your MiSTer's ROM search path for this core
    (typically `games/Battlantis/`; MiSTer resolves this from more than
    one folder depending on your setup, so check where your other arcade
