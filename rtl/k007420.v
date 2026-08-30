@@ -47,19 +47,13 @@ module k007420 (
     // Battlantis.sv's `test_done ? sprite_sdram_req : test_p3_req` mux).
     // Before that point, Port 3's shared ready/dout lines are answering the
     // self-test's OWN dummy reads (0x11/0x22/0x33/0x44) -- not anything this
-    // module asked for -- but has_non_zero_rom/has_ever_ready below were
-    // watching those same shared lines unconditionally, so they latched
-    // green from the self-test's non-zero dummy bytes before a single real
-    // sprite fetch ever occurred. That made the diagnostic boxes falsely
-    // report success. Gating on this signal makes them reflect only this
-    // module's own real Port 3 traffic.
+    // module asked for. Gating diagnostics on this signal makes them
+    // reflect only this module's own real Port 3 traffic.
     input  wire        sprite_traffic_active,
 
     // Diagnostic outputs
     output wire [15:0] diag_sdram_req_count,
     output wire [15:0] diag_sdram_ready_count,
-    output wire        has_non_zero_rom_out,
-    output wire        has_ever_ready_out,
     output wire [17:0] max_sdram_addr_out,
     output wire        frame_has_nonzero_out,
     // Session-long (not per-frame-reset) high-water mark of the highest BRAM
@@ -494,35 +488,30 @@ module k007420 (
     end
     assign frame_has_nonzero_out = frame_has_nonzero;
 
-    reg has_non_zero_rom;
-    always @(posedge clk) begin
-        if (reset || !sprite_traffic_active) has_non_zero_rom <= 1'b0;
-        else if (sprite_sdram_ready && sprite_sdram_dout != 8'h00) has_non_zero_rom <= 1'b1;
-    end
-
-    // Disambiguates has_non_zero_rom's two possible causes: latches true the very
-    // first time the raw arbiter Port 3 ready pulse is ever observed (after this
-    // module actually owns Port 3), regardless of data value. If this stays
-    // false, Port 3 requests never complete at all (arbiter/handshake problem).
-    // If this goes true but has_non_zero_rom stays false, requests DO complete
-    // but the ROM data itself is always zero (IOCTL load/addressing problem,
-    // not a handshake problem).
-    reg has_ever_ready;
-    always @(posedge clk) begin
-        if (reset || !sprite_traffic_active) has_ever_ready <= 1'b0;
-        else if (sprite_sdram_ready) has_ever_ready <= 1'b1;
-    end
-
     assign sprite_sdram_addr = 25'h20000 + {7'd0, calc_rom_addr};
     assign diag_sdram_req_count = diag_req_count;
     assign diag_sdram_ready_count = diag_ready_count;
-    assign has_non_zero_rom_out = has_non_zero_rom;
-    assign has_ever_ready_out = has_ever_ready;
 
     // ==============================================================================
     // SPRITE RAM (512 Bytes True Dual-Port BRAM)
     // ==============================================================================
     (* ramstyle = "M10K" *) reg [7:0] oam [0:511];
+    // 2026-08-29, task #83 follow-up: `oam` is read directly by the sprite
+    // render machine (oam_dout below) with no valid-bit gating at all --
+    // unlike k007342.v's vram, which got this same fix, this had no
+    // defined power-on content, so FPGA block RAM's fixed (not random,
+    // unlike real discrete SRAM) uninitialized bit pattern read as sprite
+    // attribute/position/tile-code bytes, drawing garbage sprites (using
+    // otherwise-correctly-loaded real tile data from sprite_rom_bram,
+    // which is why the garbage looked like genuine sprite content rather
+    // than random noise) for the brief window before the CPU's boot code
+    // writes real OAM content. Same fix as k007342.v's vram: an explicit
+    // all-zero initial value costs no additional M10K blocks, only
+    // changes their power-on content.
+    initial begin
+        integer oam_init_i;
+        for (oam_init_i = 0; oam_init_i < 512; oam_init_i = oam_init_i + 1) oam[oam_init_i] = 8'h00;
+    end
 
     // Port A: CPU Read/Write Interface
     reg [7:0] cpu_dout_reg;
@@ -785,7 +774,8 @@ module k007420 (
     // multiply below only needs an 11x10 multiplier, not 13x10, shortening
     // this section's combinational path (an initial wider-than-necessary
     // version left -0.42ns of unmet setup slack).
-    wire [10:0] y_local_dx = (true_y_diff_w - y_tile_dest_start);
+    wire [12:0] y_local_dx_full = true_y_diff_w - y_tile_dest_start;
+    wire [10:0] y_local_dx = y_local_dx_full[10:0];
     wire [20:0] y_local_mul = y_local_dx * zoom_raw;
     wire [13:0] y_local_full = y_local_mul[20:7];
     wire [4:0]  y_local_src = (y_local_full > 14'd7) ? 5'd7 : y_local_full[4:0];
@@ -804,7 +794,8 @@ module k007420 (
         (x_tile_new == 2'd0) ? 13'd0 :
         (x_tile_new == 2'd1) ? tile_bound1 :
         (x_tile_new == 2'd2) ? tile_bound2 : tile_bound3;
-    wire [10:0] x_local_dx = (pix_x_w - x_tile_dest_start); // see y_local_dx's comment above
+    wire [12:0] x_local_dx_full = pix_x_w - x_tile_dest_start;
+    wire [10:0] x_local_dx = x_local_dx_full[10:0]; // see y_local_dx's comment above
     wire [20:0] x_local_mul = x_local_dx * zoom_raw;
     wire [13:0] x_local_full = x_local_mul[20:7];
     wire [4:0]  x_local_src = (x_local_full > 14'd7) ? 5'd7 : x_local_full[4:0];
@@ -855,7 +846,8 @@ module k007420 (
 
     // Signed X position (spr_flags[7] is X MSB: 1 = sprite offset by -256 pixels per MAME ox = spr_x - 256 spec)
     wire signed [9:0] signed_spr_x = spr_flags[7] ? ($signed({1'b0, spr_x}) - 10'sd256) : $signed({2'b00, spr_x});
-    wire signed [9:0] cur_draw_x = signed_spr_x + $signed({5'd0, pix_x});
+    wire signed [11:0] cur_draw_x_full = signed_spr_x + $signed({5'd0, pix_x});
+    wire signed [9:0] cur_draw_x = cur_draw_x_full[9:0];
     
     // Multiply by 32 bytes per 8x8 tile, then add Y offset (4 bytes per line) and X offset (1 byte per 2 pixels)
     wire [17:0] calc_rom_addr = {final_8x8_index, 5'd0} + {13'd0, actual_y[2:0], 2'd0} + {15'd0, actual_x[2:1]};
@@ -899,8 +891,8 @@ module k007420 (
 
     // Latch 25'h20003 byte on the write-path instead of reading it with an extra
     // BRAM port (which broke simple dual-port inference and forced Quartus to
-    // implement the 512Kb array using general logic/registers, causing a massive
-    // synthesis hang).
+    // implement the 512Kb array using general logic/registers, hanging the
+    // fitter for a very long time).
     // NOT gated on `reset` (= sys_reset | ioctl_download at the top level) --
     // that signal stays HIGH for the entire download, including the exact
     // moment ioctl_addr==25'h20003 is written, so a reset branch here would

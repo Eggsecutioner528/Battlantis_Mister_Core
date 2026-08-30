@@ -306,7 +306,7 @@ module Blend
 	input  [23:0] D,
 	input  [23:0] F,
 	input  [23:0] H,
-	output [23:0] Result
+	output reg [23:0] Result
 );
 
 	localparam BLEND1 = 7'b110_10_00; // (A * 12 + B * 4        ) >> 4

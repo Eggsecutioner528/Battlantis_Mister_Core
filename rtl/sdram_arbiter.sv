@@ -27,6 +27,18 @@ module sdram_arbiter (
     output reg [7:0] p3_dout,
     output reg    p3_ready,
 
+    // Port 3 in-flight indicator (2026-08-14, Test 221): exposes
+    // latched_p3_req directly so other modules can tell whether a Port 3
+    // transaction is registered/in-flight anywhere in the pipeline (from
+    // the cycle p3_req is latched through dispatch/wait/complete/cooldown),
+    // not just whether p3_req happens to be pulsing THIS exact cycle --
+    // k007420 only asserts sprite_sdram_req for a single cycle, so a raw
+    // p3_req check would see "idle" while a request is still fully
+    // in-flight, letting a concurrent Port 2 request slip in and recreate
+    // the same contention it was meant to avoid (caught by Gemini review
+    // before this was ever deployed).
+    output wire   p3_active,
+
     // SDRAM Controller Interface
     output reg [24:0] sdram_addr,
     output reg        sdram_rd,
@@ -41,6 +53,22 @@ module sdram_arbiter (
     reg [1:0] active_port;
     reg wait_flag;
     reg rr_toggle; // Round-robin toggle between Tilemaps (Port 2) and Sprites (Port 3)
+
+    // Test 215 (2026-08-14): under sustained P2+P3 contention, the round-robin
+    // above previously flipped rr_toggle after every single transaction --
+    // the maximum possible SDRAM bus switching rate. Tests 206/210/211 found a
+    // stable ~35-46% read-corruption rate under exactly this concurrent
+    // pattern that simulation cannot reproduce (Test 212: 1000/1000 pass in
+    // an idealized model) and that more read-recovery margin didn't fix (Test
+    // 211) -- consistent with a physical/electrical effect from rapid
+    // switching between two usually-distant address regions (tile ROM vs
+    // sprite ROM), not a logic bug. This batches up to BATCH_MAX consecutive
+    // transactions per port before yielding, to test whether reducing the
+    // switch *frequency* (not the total contention volume) reduces the
+    // corruption rate. Diagnostic-only experiment: does not change dispatch
+    // behavior when only one of P2/P3 is requesting.
+    localparam [2:0] BATCH_MAX = 3'd7; // up to 8 consecutive transactions per port
+    reg [2:0] batch_streak;
 
     // sdram.sv 8-bit mode: wtbt=2'b00 means sdram.sv uses addr[0] to select byte for WRITES.
     // However, for READS, sdram_dout is always the 16-bit word. We must select the correct byte.
@@ -62,20 +90,19 @@ module sdram_arbiter (
 
     reg [24:0] latched_p0_addr, latched_p1_addr, latched_p2_addr, latched_p3_addr;
     reg [7:0] latched_p0_din;
-
-    reg last_p0_req, last_p1_req, last_p2_req, last_p3_req;
+    
+    reg last_p0_req;
     reg last_p0_addr_valid;
 
-    // sdram.sv's `ready` is a level signal that stays high from the PREVIOUS
-    // idle period until it sees the rd/we edge in state 1 -- in the gap
-    // between leaving state 0 and that edge (states 4 and the start of 1), an
-    // earlier latched-ready mechanism here could latch true almost
-    // immediately from the stale pre-request value, reporting "done" before
-    // the real SDRAM transaction had even been issued and sampling stale/zero
-    // data instead of waiting out the actual CAS latency. Waiting on live
-    // sdram_ready directly is correct here since it genuinely drops low once
-    // the request is registered.
-
+    // Removed latched_sdram_ready: sdram.sv's `ready` is a level signal that stays
+    // high from the PREVIOUS idle period until it sees the rd/we edge in state 1 --
+    // in the gap between leaving state 0 and that edge (states 4 and the start of
+    // 1), state!=0 so the old latch's reset-clear no longer applied, while
+    // sdram_ready was still the stale pre-request high value, so it latched true
+    // almost immediately. State 2 then reported "done" before the real SDRAM
+    // transaction had even been issued, sampling stale/zero data instead of
+    // waiting out the actual CAS latency. Waiting on live sdram_ready directly is
+    // correct here since it genuinely drops low once the request is registered.
     always @(posedge clk) begin
         if (reset) begin
             state <= 0;
@@ -90,11 +117,9 @@ module sdram_arbiter (
             latched_p2_req <= 0;
             latched_p3_req <= 0;
             last_p0_req <= 0;
-            last_p1_req <= 0;
-            last_p2_req <= 0;
-            last_p3_req <= 0;
             last_p0_addr_valid <= 0;
             rr_toggle <= 0;
+            batch_streak <= 3'd0;
         end else begin
             // Port 0 handshaking for continuous or pulsed ioctl_wr from hps_io
             last_p0_req <= p0_req;
@@ -105,13 +130,10 @@ module sdram_arbiter (
                 last_p0_addr_valid <= 1'b1;
             end
             
-            last_p1_req <= p1_req;
             if (p1_req && !latched_p1_req) begin latched_p1_req <= 1; latched_p1_addr <= p1_addr; end
-            
-            last_p2_req <= p2_req;
+
             if (p2_req && !latched_p2_req) begin latched_p2_req <= 1; latched_p2_addr <= p2_addr; end
-            
-            last_p3_req <= p3_req;
+
             if (p3_req && !latched_p3_req) begin latched_p3_req <= 1; latched_p3_addr <= p3_addr; end
 
             // Default pulse clear
@@ -133,16 +155,29 @@ module sdram_arbiter (
                             active_port <= 1;
                             state <= 4;
                         end else if (latched_p2_req && latched_p3_req) begin
-                            // Both Tilemaps and Sprites requesting: Round-Robin fair arbitration
+                            // Both Tilemaps and Sprites requesting: batch up to
+                            // BATCH_MAX consecutive transactions per port before
+                            // flipping rr_toggle (Test 215 -- see comment at
+                            // batch_streak's declaration above).
                             if (rr_toggle == 1'b0) begin
                                 sdram_addr <= latched_p2_addr;
                                 active_port <= 2;
-                                rr_toggle <= 1'b1;
+                                if (batch_streak >= BATCH_MAX) begin
+                                    rr_toggle <= 1'b1;
+                                    batch_streak <= 3'd0;
+                                end else begin
+                                    batch_streak <= batch_streak + 3'd1;
+                                end
                                 state <= 4;
                             end else begin
                                 sdram_addr <= latched_p3_addr;
                                 active_port <= 3;
-                                rr_toggle <= 1'b0;
+                                if (batch_streak >= BATCH_MAX) begin
+                                    rr_toggle <= 1'b0;
+                                    batch_streak <= 3'd0;
+                                end else begin
+                                    batch_streak <= batch_streak + 3'd1;
+                                end
                                 state <= 4;
                             end
                         end else if (latched_p2_req) begin
@@ -199,6 +234,14 @@ module sdram_arbiter (
                 end
                 
                 3: begin // Cooldown (ensures requesters deassert their req)
+                    // Reverted to pre-Test-169 form (2026-08-12, Test 176): Test 169's
+                    // re-sample-instead-of-clear change is the prime suspect for the
+                    // self-test (diag_byte1-3 RED) and GAME-OVER-background static
+                    // regressions seen in every test since -- both persisted unchanged
+                    // even with Test 171-175's p3_ready_sticky mechanism in k007420.v
+                    // completely removed, isolating the cause to this file. Testing this
+                    // revert in isolation to confirm before re-examining Test 169's
+                    // actual back-to-back-request race on its own.
                     case (active_port)
                         0: latched_p0_req <= 0;
                         1: latched_p1_req <= 0;
@@ -210,5 +253,7 @@ module sdram_arbiter (
             endcase
         end
     end
+
+    assign p3_active = latched_p3_req;
 
 endmodule

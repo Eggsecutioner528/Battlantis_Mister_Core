@@ -31,7 +31,149 @@ module jtopl(
     output                 irq_n,
     // combined output
     output  signed  [15:0] snd,
-    output                 sample
+    output                 sample,
+
+    // 2026-08-19, task #8 round 40: diagnostic-only taps into the internal
+    // envelope generator, added to investigate a confirmed real-hardware-vs-
+    // simulation magnitude gap (isolated simulation of this exact core, with
+    // the exact real, exhaustively register-level-verified-correct
+    // Battlantis channel-0 note, reaches a genuine ~3954/32767 peak; real
+    // hardware never exceeds 256 across 40+ real seconds with the identical
+    // configuration). dbg_eg_V is the envelope generator's raw current
+    // output (0=loudest/no attenuation, higher=more attenuated, matching
+    // eg_V's own existing internal convention -- see jtopl_eg.v).
+    // dbg_ch0car_valid pulses for exactly one cenop cycle whenever dbg_eg_V
+    // is valid for channel 0's carrier operator specifically (internal
+    // group==0, subslot==3 -- independently confirmed via jtopl_mmr.v's own
+    // real register-decode logic for register 0x43, channel 0's carrier
+    // Total Level register: selreg[4:3]=group=0, selreg[2:0]=subslot=3).
+    // The 3-stage delay below exists because eg_V is registered through
+    // jtopl_eg.v's own internal 4-stage I->II->III->IV pipeline before
+    // becoming valid, so the {group,subslot} that identified the ORIGINAL
+    // request must be delayed by the same 3 cycles to correctly identify
+    // eg_V's owner once it emerges -- confirmed by cross-referencing
+    // against jtopl_op.v's own identical pattern (its u_delay, also 3
+    // stages, produces group_d/op_d specifically so they land on the same
+    // cycle as eg_atten_II, i.e. this same eg_V signal, when the two are
+    // combined at "REGISTER/CYCLE 2" in that file).
+    output          [ 9:0] dbg_eg_V,
+    output                  dbg_ch0car_valid,
+
+    // 2026-08-19, task #8 round 43: diagnostic-only pass-through -- see
+    // jtopl_eg.v's port declaration comment for the full reasoning.
+    output          [14:0] dbg_eg_cnt,
+
+    // 2026-08-19, task #8 round 44: diagnostic-only pass-through, plus a
+    // NEW undelayed channel-0-carrier-valid signal (distinct from
+    // dbg_ch0car_valid above, which is deliberately delayed 3 cycles to
+    // match eg_V/eg_atten_II's later validity) -- keyon_now_I is a
+    // "stage I" signal, valid on the SAME cycle as the raw group/subslot,
+    // so no delay is needed here. See jtopl_eg.v's port comment.
+    output                  dbg_keyon_now_I,
+    output                  dbg_ch0car_valid_I,
+
+    // 2026-08-19, task #8 round 48: plain wire pass-throughs only, no new
+    // registers in this file this time. See jtopl_eg.v's port comment.
+    output                  dbg_sum_up_II,
+    output                  dbg_cenop,
+
+    // 2026-08-19, task #8 round 49: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output      [9:0]       dbg_eg_in_I,
+
+    // 2026-08-19, task #8 round 51: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output                  dbg_step_II,
+
+    // 2026-08-19, task #8 round 52: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output      [2:0]       dbg_state_in_I,
+
+    // 2026-08-19, task #8 round 53: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output                  dbg_attack_II,
+
+    // 2026-08-19, task #8 round 55: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output                  dbg_joint_hit_II,
+
+    // 2026-08-20, task #8 round 63: plain pass-through. See jtopl_eg.v's
+    // port comment.
+    output                  dbg_joint_hit_III,
+
+    // 2026-08-20, task #8 round 68 follow-up: plain pass-through. See
+    // jtopl_eg.v's port comment.
+    output      [3:0]       dbg_arate_I,
+    output      [5:0]       dbg_rate_II,
+
+    // 2026-08-20, task #8 round 79: see jtopl_reg.v's identical port
+    // comment for the full reasoning.
+    output                  dbg_ar_dr_applied_ch0car,
+    output                  dbg_up_ar_dr_raw,
+    output                  dbg_ar_dr_clobbered,
+    output                  dbg_pending_was_ch0car,
+
+    // 2026-08-22, task #8 round 115: channel 4's own carrier valid gate,
+    // mirroring dbg_ch0car_valid_I above exactly but for channel 4
+    // (group=1, subslot=4 -- channel 4: group=ch/3=1, sub=ch%3=1, carrier
+    // offset=sub+3=4, matching this file's own {group,subslot} addressing
+    // convention). Round 114 confirmed channel 4's SL/RR register genuinely
+    // holds RR=0, and a real-MAME cross-check proved this exact note
+    // decays cleanly on correct hardware -- so this taps channel 4's own
+    // internal state/keycode/ksr (alongside the already-exposed
+    // dbg_state_in_I/dbg_rate_II, shared "stage I"/"stage II" signals valid
+    // for whichever slot this gate identifies) to find where this core's
+    // computation diverges from correct behavior.
+    output                  dbg_ch4car_valid_I,
+    output      [3:0]       dbg_keycode_II,
+    output                  dbg_ksr_II,
+
+    // 2026-08-22, task #8 round 121: general-purpose carrier-operator
+    // identification, generalizing dbg_ch0car_valid/dbg_ch4car_valid_I to
+    // ALL 9 real channels at once instead of one hardcoded channel each.
+    // Round 120's ROM patch was hardware-verified (via the existing
+    // stuck_channel_sl_rr_snapshot readback) to genuinely reach channel 4's
+    // carrier RR register (confirmed reading 0x0F, max release rate) and to
+    // genuinely drive channel 4's own live rate/state (dbg_rate_II=63,
+    // dbg_state_in_I=RELEASE) -- yet the real hardware hang got LONGER
+    // (10.5s+, directly measured via a live-updating duration counter), not
+    // shorter. A note releasing at the fastest possible OPL2 rate cannot
+    // legitimately still be audible 10+ seconds later, so channel 4 is
+    // very unlikely to be the actual source; round 113's "last channel to
+    // go key-off" snapshot heuristic can easily misattribute the real
+    // culprit to whichever channel simply happened to go silent around the
+    // same moment. dbg_car_ch_valid/dbg_car_ch_num let the integrating file
+    // read EVERY channel's own carrier attenuation (dbg_eg_V) directly and
+    // independently, using the exact same dbg_loc_d 3-stage-delayed
+    // {group,subslot} this file already computes for dbg_ch0car_valid
+    // (see u_dbg_locdelay below) -- subslot>=3 identifies a carrier
+    // (subslots 0-2 are the group's 3 modulators, 3-5 its 3 carriers, per
+    // this file's own existing group=ch/3, sub=ch%3(+3 for carrier)
+    // addressing convention, already independently confirmed via
+    // jtopl_mmr.v's real register-decode logic), and
+    // group*3+(subslot-3) recovers the real channel number 0-8.
+    output                  dbg_car_ch_valid,
+    output      [3:0]       dbg_car_ch_num,
+
+    // 2026-08-24, task #8 round 144: channels 7/8's own carrier valid
+    // gates, mirroring dbg_ch0car_valid_I/dbg_ch4car_valid_I above
+    // exactly (group=ch/3, subslot=ch%3+3). Round 143's own live raw
+    // eg_V readout found both channels repeatedly parking at a specific,
+    // recurring mid-scale attenuation (96 for ch7, ~504 for ch8) instead
+    // of decaying to full silence -- these gates let the integrating
+    // file tap each channel's own internal envelope state/rate/keycode
+    // (the same "stage I"/"stage II" signals dbg_ch0car_valid_I/
+    // dbg_ch4car_valid_I already expose) to find the exact rate/keycode
+    // bucket responsible, the same methodology that found round 68's
+    // original AR=15 fix. NOT using the general-purpose, 3-stage-delayed
+    // dbg_car_ch_valid/dbg_car_ch_num above for this -- that pair is
+    // deliberately delayed to align with dbg_eg_V's own pipeline latency,
+    // while dbg_state_in_I is an undelayed "stage I" signal; gating it on
+    // the delayed valid would read state from the wrong cycle. A fresh,
+    // undelayed per-channel gate (exactly like ch0/ch4's) is the correct,
+    // safe way to stay aligned with dbg_state_in_I.
+    output                  dbg_ch7car_valid_I,
+    output                  dbg_ch8car_valid_I
 );
 
 parameter OPL_TYPE=1;
@@ -41,6 +183,7 @@ wire          write;
 wire  [ 1:0]  group;
 wire  [17:0]  slot;
 wire  [ 3:0]  trem;
+wire  [ 2:0]  subslot; // 2026-08-19, task #8 round 40: diagnostic use only
 
 // Timers
 wire          flag_A, flag_B, flagen_A, flagen_B;
@@ -101,6 +244,7 @@ jtopl_mmr #(.OPL_TYPE(OPL_TYPE)) u_mmr(
     .group      ( group         ),
     .op         ( op            ),
     .slot       ( slot          ),
+    .subslot    ( subslot       ),
     .rhy_en     ( rhy_en        ),
     // Timers
     .value_A    ( value_A       ),
@@ -136,7 +280,11 @@ jtopl_mmr #(.OPL_TYPE(OPL_TYPE)) u_mmr(
     .vib_dep    ( vib_dep       ),
     // Timbre
     .fb_I       ( fb_I          ),
-    .con_I      ( con_I         )
+    .con_I      ( con_I         ),
+    .dbg_ar_dr_applied_ch0car ( dbg_ar_dr_applied_ch0car ),
+    .dbg_up_ar_dr_raw ( dbg_up_ar_dr_raw ),
+    .dbg_ar_dr_clobbered ( dbg_ar_dr_clobbered ),
+    .dbg_pending_was_ch0car ( dbg_pending_was_ch0car )
 );
 
 jtopl_timers u_timers(
@@ -214,8 +362,26 @@ jtopl_eg u_eg(
     .tl_IV      ( tl_IV         ),
     .ksl_IV     ( ksl_IV        ),
     .eg_V       ( eg_V          ),
-    .pg_rst_II  ( pg_rst_II     )
+    .pg_rst_II  ( pg_rst_II     ),
+    .dbg_eg_cnt ( dbg_eg_cnt    ),
+    .dbg_keyon_now_I ( dbg_keyon_now_I ),
+    .dbg_sum_up_II   ( dbg_sum_up_II   ),
+    .dbg_eg_in_I     ( dbg_eg_in_I     ),
+    .dbg_step_II     ( dbg_step_II     ),
+    .dbg_state_in_I  ( dbg_state_in_I  ),
+    .dbg_attack_II   ( dbg_attack_II   ),
+    .dbg_joint_hit_II( dbg_joint_hit_II),
+    .dbg_joint_hit_III( dbg_joint_hit_III),
+    .dbg_arate_I     ( dbg_arate_I     ),
+    .dbg_rate_II     ( dbg_rate_II     ),
+    .dbg_keycode_II  ( dbg_keycode_II  ),
+    .dbg_ksr_II      ( dbg_ksr_II      )
 );
+assign dbg_ch0car_valid_I = (group == 2'd0) && (subslot == 3'd3);
+assign dbg_ch4car_valid_I = (group == 2'd1) && (subslot == 3'd4);
+assign dbg_ch7car_valid_I = (group == 2'd2) && (subslot == 3'd4);
+assign dbg_ch8car_valid_I = (group == 2'd2) && (subslot == 3'd5);
+assign dbg_cenop = cenop;
 
 jtopl_op #(.OPL_TYPE(OPL_TYPE)) u_op(
     .rst        ( rst           ),
@@ -237,6 +403,25 @@ jtopl_op #(.OPL_TYPE(OPL_TYPE)) u_op(
     .op_out     ( op_out        ),
     .con_out    ( con_out       )
 );
+
+// 2026-08-19, task #8 round 40: 3-stage delay matching jtopl_op.v's own
+// u_delay (identical stages=3, same cenop), applied to {group,subslot}
+// captured at the SAME time as this cycle's eg_V request, so that once
+// eg_V (=eg_atten_II) emerges 3 cycles later, dbg_group_d/dbg_subslot_d
+// correctly identify which operator it belongs to. See the port
+// declaration comment above for the full reasoning.
+wire [4:0] dbg_loc_d;
+jtopl_sh #( .width(5), .stages(3)) u_dbg_locdelay(
+    .clk    ( clk                       ),
+    .cen    ( cenop                     ),
+    .din    ( { group, subslot }       ),
+    .drop   ( dbg_loc_d                 )
+);
+assign dbg_eg_V          = eg_V;
+assign dbg_ch0car_valid  = (dbg_loc_d[4:3] == 2'd0) && (dbg_loc_d[2:0] == 3'd3);
+// 2026-08-22, task #8 round 121: see port declaration comment above.
+assign dbg_car_ch_valid  = (dbg_loc_d[2:0] >= 3'd3);
+assign dbg_car_ch_num    = ({2'b0, dbg_loc_d[4:3]} * 4'd3) + ({1'b0, dbg_loc_d[2:0]} - 4'd3);
 
 jtopl_acc u_acc(
     .rst        ( rst           ),

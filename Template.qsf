@@ -229,6 +229,7 @@ set_global_assignment -name DEVICE_FILTER_SPEED_GRADE 7
 set_global_assignment -name DEVICE 5CSEBA6U23I7
 set_global_assignment -name FAMILY "Cyclone V"
 set_global_assignment -name CDF_FILE jtag.cdf
+set_global_assignment -name SDC_FILE Template.sdc
 set_global_assignment -name QIP_FILE sys/sys.qip
 set_global_assignment -name QIP_FILE rtl/pll.qip
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
@@ -339,6 +340,8 @@ set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_reg.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_reg_ch.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_sh.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_sh_rst.v
+set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_sh_rst_ram.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_single_acc.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_slot_cnt.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_timers.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/hd6309/hd6309i.v

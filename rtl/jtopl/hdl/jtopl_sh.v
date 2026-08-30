@@ -27,6 +27,17 @@ module jtopl_sh #(parameter width=5, stages=24 )
    	output	[width-1:0]	drop
 );
 
+// 2026-08-20, task #8 round 75: same rationale as jtopl_sh_rst.v's
+// identical change -- confirmed via compile log that Quartus auto-infers
+// an altshift_taps megafunction from this exact per-bit array pattern too
+// (e.g. u_cntsh, u_fnumsh, u_blocksh in jtopl_eg.v, and a jtopl_op.v
+// instance explicitly tagged "shift_taps_egv" -- envelope generator value
+// -- in the Fitter's own log). Forcing genuine discrete registers here as
+// well, for consistency across every shift-register-shaped module in this
+// design.
+// 2026-08-20, task #8 round 75/76: TESTED AND REVERTED. See
+// jtopl_sh_rst.v's identical change for the full reasoning -- verified on
+// real hardware to make no difference to the frozen envelope.
 reg [stages-1:0] bits[width-1:0];
 
 genvar i;

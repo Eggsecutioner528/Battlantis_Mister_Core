@@ -14,8 +14,6 @@ assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign LED_DEBUG = 8'd0;
 
-assign VGA_HB = ~VGA_DE;
-assign VGA_VB = ~VGA_DE;
 assign VGA_SCALER  = 0;
 assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
@@ -76,6 +74,38 @@ localparam CONF_STR = {
     "-;",
     "T[0],Reset;",
     "R[0],Reset and close OSD;",
+    // 2026-08-28/29, task #81, CLOSED: this line originally sat right
+    // after "Battlantis;;", at the very top of CONF_STR -- that placement
+    // caused a real OSD navigation off-by-one (selecting one menu item
+    // activated the item below it; "Reset and close OSD" only closed).
+    // Moved here, immediately before the version line, matching the more
+    // common placement seen in other MiSTer cores -- confirmed fixed on
+    // real hardware.
+    // 2026-08-29, player feedback: extended from just "Fire" to name the
+    // real joystick button bits this core reads (m_coin1/m_start1/m_test
+    // wiring further down this file) -- bit4=Fire, bit5=Coin, bit6=Start,
+    // in that order, matching MiSTer's "Define joystick" mapping screen's
+    // implicit bit-position convention (bits 0-3 are always the 4
+    // directions, unnamed/implicit; named buttons start at bit4 in listed
+    // order, packed with no gaps). A single "J1" line covers BOTH players
+    // symmetrically -- MiSTer applies the same named button list to
+    // whichever physical controller is in the Player 2 slot too
+    // (player_2_inputs below reads joystick_1 with the identical bit
+    // layout); there is no separate "J2" directive in real MiSTer
+    // convention. A prior version of this line invented one ("J2,...;"),
+    // which isn't real MiSTer syntax and left Player 2 with no working
+    // Start/button mapping UI at all -- removed.
+    // A version right before this one tried leaving bit6 as an empty,
+    // unnamed slot (the double-comma, "J1,Fire,Coin,,Start;") to drop the
+    // redundant Test button while keeping Start anchored to bit7 -- that
+    // syntax did not work as assumed and broke Start entirely (it stopped
+    // registering in-game). Fixed properly this time: Start and Test
+    // (m_test below) simply trade bit positions, so the named list packs
+    // cleanly into bits 4/5/6 with zero gaps and nothing relies on
+    // unverified CONF_STR skip syntax. Test moves to the now-unnamed
+    // bit 7 -- redundant with the OSD's own "Mode: Game/Test" option
+    // anyway, so not needing a "Define joystick" prompt is fine.
+    "J1,Fire,Coin,Start;",
     "V,v",`BUILD_DATE 
 };
 
@@ -197,6 +227,46 @@ sdram sdram_inst (
             end else if (ioctl_addr >= 25'h10000 && ioctl_addr < 25'h18000) begin
                 fixed_rom[ioctl_addr[14:0]] <= ioctl_dout;
             end
+        end
+    end
+
+    // 2026-08-28: K007342 Layer 1 game-content detection. Confirmed in
+    // simulation (see project_history/TASKS.md's Rack 'Em Up section) that
+    // Battlantis's own ROM uses most of K007342's Layer 1 VRAM as CPU
+    // scratch RAM rather than real tile data -- compositing Layer 1 into
+    // the video output unconditionally (needed for Rack 'Em Up, which DOES
+    // use Layer 1 for real graphics) makes that scratch data render as
+    // widespread garbage on Battlantis (measured: 68.55% of pixels showing
+    // Layer 1 content in a Verilator run). Both games load the same
+    // bitstream, so this can't be a compile-time choice -- it's derived
+    // from the ROM content itself, latched from the banked ROM's very
+    // first downloaded byte (ioctl_addr==0), which is real 6809/6309
+    // program code and reliably differs between the two games' actual
+    // compiled ROMs (confirmed directly: Battlantis's is 8'h03, Rack 'Em
+    // Up's is 8'h40). Defaults toward enabling Layer 1 (the real, generic
+    // K007342 behavior) for anything that isn't specifically Battlantis's
+    // own known signature, rather than defaulting off and needing a
+    // signature for every future game that might reuse this core.
+    // NOTE: no reset gating here, deliberately -- `reset` (declared
+    // further below) is `sys_reset | ioctl_download`, high for the whole
+    // duration of every ROM download, so an `if (reset) ... else if
+    // (ioctl_download && ...)` structure would always take the reset
+    // branch and the capture would never fire; a first attempt gating on
+    // `sys_reset` alone instead of the combined `reset` still produced no
+    // real change in behavior (Verilator's layer1_wins stayed identical
+    // to the ungated version), consistent with (though not fully isolated
+    // as definitely caused by) `sys_reset` also still being asserted
+    // through the download window in this harness. Removed the reset
+    // branch entirely instead of chasing the exact cause further -- this
+    // matches the `banked_rom` write logic immediately above, which also
+    // has no reset gate at all and is proven working. The register's
+    // power-on value is irrelevant since this capture unconditionally
+    // fires during the very same download that also populates
+    // banked_rom, before layer1_enable is ever consumed.
+    reg layer1_enable;
+    always @(posedge clk_sys) begin
+        if (ioctl_download && ioctl_wr && ioctl_addr == 25'h0) begin
+            layer1_enable <= (ioctl_dout != 8'h03);
         end
     end
 
@@ -652,6 +722,75 @@ wire pause_cpu = status[30];
 wire k007342_irq; // Interrupt from K007342, driven on vblank when interrupts enabled
 wire cpu_bs, cpu_ba; // Bus Status / Bus Available -- see k007342_irq_ack below
 
+// 2026-08-27/28, Rack 'Em Up bring-up: the plain mc6809i core can't decode
+// genuine HD6309 native-mode opcodes (OIM/AIM/EIM/TIM etc.) that Rack 'Em
+// Up's ROM uses but Battlantis's own ROM never needed, even though both
+// games' real boards use the same HD6309E.
+//
+// SIM_USE_JTKCPU swaps in Jotego's jtkcpu core (via the mc6809is adapter).
+// Investigated at length and ultimately abandoned for this purpose: jtkcpu
+// turns out to emulate Konami's own *proprietary* 052001/052526 CPU chips
+// (its own README says so directly), which use a completely different,
+// Konami-internal opcode encoding -- confirmed directly by tracing real ROM
+// bytes through it (e.g. real byte $4F, which is CLRA on genuine 6809/6309
+// hardware, dispatches as jtkcpu's own internal "CMPY_IDX" instead, since
+// jtkcpu's case(op) table just doesn't use real Hitachi opcode values at
+// all). Rack 'Em Up's real board uses a genuine, unmodified HD6309 -- not
+// a Konami custom CPU -- so jtkcpu was never going to correctly execute
+// its ROM regardless of any RTL bugs fixed along the way. Kept available
+// under its own switch since a real 052001/052526-based title (several
+// exist per jtkcpu's own game list, e.g. Haunted Castle, Ajax) could
+// genuinely need it later.
+//
+// hd6309i (rtl/hd6309/, Roger Taylor's native-mode extension of Greg
+// Miller's own mc6809 core -- the same upstream project this file's
+// mc6809i already came from) decodes genuine Hitachi HD6309 opcodes and
+// shares mc6809i's E/Q bus protocol closely enough to reuse the exact same
+// cpu_e/cpu_q wiring below, no special adapter/wait-state module needed
+// the way jtkcpu's cen2-driven bus required.
+//
+// 2026-08-28: promoted hd6309i from simulation-only (`ifdef SIM_USE_HD6309)
+// to the real default here (both simulation and real Quartus synthesis).
+// Verified extensively in Verilator first: Battlantis's own full run
+// diffs byte-identical against mc6809i (module interfaces match exactly,
+// confirmed via direct source comparison), and fixing a genuine hd6309i
+// bug (NMILatched had no reset path, causing a phantom NMI to be serviced
+// on the CPU's very first post-reset fetch -- see rtl/hd6309/hd6309i.v's
+// own comment at its declaration) was what let Rack 'Em Up's real
+// HD6309-native-mode ROM finally boot past its first ~4,800 instructions
+// in simulation. mc6809i itself is untouched and kept available as an
+// explicit rollback path (`define LEGACY_MC6809) if hd6309i turns up a
+// real-synthesis-specific issue simulation didn't catch (timing closure,
+// a Quartus-specific inference quirk, etc.) -- not expected, since both
+// cores share the same non-native-mode logic, but not yet confirmed on
+// real hardware either.
+`ifdef SIM_USE_JTKCPU
+reg [15:0] mrdy_addr_prev_hd6309;
+always @(posedge clk_sys) mrdy_addr_prev_hd6309 <= cpu_addr;
+wire mrdy_hd6309 = (cpu_addr == mrdy_addr_prev_hd6309);
+
+mc6809is mc6809_inst (
+    .D(cpu_din),
+    .DOut(cpu_dout),
+    .ADDR(cpu_addr),
+    .RnW(cpu_rw),
+    .E(),
+    .Q(),
+    .BS(cpu_bs),
+    .BA(cpu_ba),
+    .nIRQ(~k007342_irq),
+    .nFIRQ(1'b1),
+    .nNMI(1'b1),
+    .CLK_SYS(clk_sys),
+    .CEN_12M(clk_12m),
+    .nHALT(~pause_cpu),
+    .nRESET(~reset),
+    .MRDY(mrdy_hd6309),
+    .nDMABREQ(1'b1)
+);
+`elsif LEGACY_MC6809
+// Explicit rollback path to the pre-2026-08-28 real-hardware default --
+// see the comment above this ifdef chain. Not expected to be needed.
 mc6809i mc6809_inst (
     .D(cpu_din),
     .DOut(cpu_dout),
@@ -671,6 +810,27 @@ mc6809i mc6809_inst (
     .nDMABREQ(1'b1),
     .nHALT(~pause_cpu)
 );
+`else
+hd6309i mc6809_inst (
+    .D(cpu_din),
+    .DOut(cpu_dout),
+    .ADDR(cpu_addr),
+    .RnW(cpu_rw),
+    .E(cpu_e),
+    .Q(cpu_q),
+    .BS(cpu_bs),
+    .BA(cpu_ba),
+    .nIRQ(~k007342_irq),
+    .nFIRQ(1'b1),
+    .nNMI(1'b1),
+    .AVMA(),
+    .BUSY(),
+    .LIC(),
+    .nRESET(~reset),
+    .nDMABREQ(1'b1),
+    .nHALT(~pause_cpu)
+);
+`endif
 
 
 
@@ -752,9 +912,9 @@ always @(posedge clk_sys) begin
             // correct value matching MAME exactly) to test whether the
             // V-total change is implicated in the boot hang. Restore to
             // 263 wraparound (264 total) once this is ruled in or out.
-            v_cnt <= (v_cnt == 261) ? 0 : v_cnt + 1;
+            v_cnt <= (v_cnt == 261) ? 10'd0 : v_cnt + 10'd1;
         end else begin
-            h_cnt <= h_cnt + 1;
+            h_cnt <= h_cnt + 11'd1;
         end
     end
 end
@@ -776,6 +936,7 @@ reg k007342_vram_bank; // Bankswitch for VRAM attributes
 wire vblank;
 wire k007342_int_enabled;
 wire sprite_wrap_y;
+wire flip_screen_req; // Task #17 revival: real K007342 reg 0x00 bit4, see k007342.v's port comment
 
 // irq_ack: K007342 internal IRQ flag is cleared when CPU acknowledges the interrupt.
 // The 6809 does this by reading the interrupt vector (0xFFF8-0xFFFF during IRQ service).
@@ -813,10 +974,12 @@ wire k007342_irq_ack = cpu_bs & ~cpu_ba;
 k007342 k007342_inst (
     .clk(clk_sys),
     .reset(reset),
-    
+    .layer1_enable(layer1_enable),
+
     .vblank(vblank),
     .int_enabled(k007342_int_enabled),
     .sprite_wrap_y(sprite_wrap_y),
+    .flip_screen_req(flip_screen_req),
     .vram_bank(k007342_vram_bank),
     
     .cpu_addr(cpu_addr[13:0]),
@@ -1211,13 +1374,24 @@ wire [7:0] dip_switch_2 = (status[16:0] == 17'd0) ? 8'h5A : { demo_opt, diff_opt
 // coin2), meaning there was no way to advance past service mode's initial
 // screen (e.g. a monitor alignment/geometry pattern) once the Mode DIP
 // below put the board into test mode on reset -- confirmed via user report
-// of the board reaching that screen and going no further. joystick_0[6] was
-// unused by every other input on this core (0,1,2,3,4,5,7 all taken), so
-// it's repurposed here as the physical Test/Service button.
+// of the board reaching that screen and going no further. joystick_0[6]
+// was originally repurposed for this (Start then lived on bit 7), but see
+// the 2026-08-29 comment right below -- Start and Test have since traded
+// bit positions, so this physical Test/Service button now reads bit 7.
+// 2026-08-29: swapped which physical bit is Start vs Test. CONF_STR's J1
+// line now names exactly 3 buttons (Fire, Coin, Start occupying bits
+// 4/5/6 in order, no gaps) after an attempted "skip a name with an empty
+// slot" CONF_STR syntax left Start unreachable -- rather than trust that
+// unverified syntax again, Start and Test simply trade bit positions so
+// the named list maps cleanly with zero gaps. Test (a momentary Test/
+// Service button, redundant with the OSD's own "Mode: Game/Test" option)
+// moves to the now-unnamed bit 7, unreachable via "Define joystick" but
+// still settable via MiSTer's more advanced/manual key binding if ever
+// needed.
 wire m_coin1  = joystick_0[5] | joystick_1[5]; // Usually Select/Coin
-wire m_start1 = joystick_0[7];
-wire m_start2 = joystick_1[7];
-wire m_test   = joystick_0[6];
+wire m_start1 = joystick_0[6];
+wire m_start2 = joystick_1[6];
+wire m_test   = joystick_0[7];
 // Flip Screen OSD option removed (2026-08-27): its underlying K007342
 // reg 0x00 bit4 dynamic flip behavior was never implemented (Task #17,
 // deprioritized) and user hardware testing confirmed toggling it had no
@@ -1234,7 +1408,18 @@ wire [7:0] dip_switch_3 = (status[16:0] == 17'd0) ? {1'b1, 2'b11, ~m_start2, ~m_
 // Allow_Continue DIP -- was previously hardcoded to 1'b1 (always "3
 // Times"), leaving the "Continues" OSD option wired to nothing.
 wire [7:0] player_1_inputs = {cont_opt, 2'b11, ~joystick_0[4], ~joystick_0[3], ~joystick_0[2], ~joystick_0[0], ~joystick_0[1]};
-wire [7:0] player_2_inputs = 8'hFF; // Unused for now, default to unpressed
+// 2026-08-29, player feedback: was hardcoded to 8'hFF ("Unused for now"),
+// meaning Player 2 had no functional input at all even with "Upright
+// Controls: Dual" selected and a second controller plugged into
+// joystick_1 -- that OSD option only ever flipped a DIP bit the game
+// reads, it never actually enabled real P2 input. Confirmed via
+// extra/battlnts_mame.cpp: P2's own input port uses the same
+// KONAMI8_B1-style joystick+button macro as P1 (just the "_UNK" variant,
+// meaning its bit 7 has no special DIP-override meaning the way P1's
+// Allow_Continue bit does -- just a plain unused/inactive bit), so this
+// mirrors player_1_inputs' proven-correct bit layout exactly, substituting
+// joystick_1 for joystick_0 and a hardcoded inactive 1 for the unused bit 7.
+wire [7:0] player_2_inputs = {1'b1, 2'b11, ~joystick_1[4], ~joystick_1[3], ~joystick_1[2], ~joystick_1[0], ~joystick_1[1]};
 
 // 4KB Work RAM (0x3000 - 0x3FFF)
 (* ramstyle = "M10K" *) reg [7:0] work_ram [0:4095];
@@ -1749,8 +1934,14 @@ assign v_sync = (v_cnt >= 244 && v_cnt < 247); // Active HIGH sync
 // mapping: rotate_ccw=0 / flip=0 at Flip off gives the correct
 // orientation in each respective path.
 wire no_rotate  = ~orientation_vertical;
-wire rotate_ccw = flip_monitor;
-wire flip       = flip_monitor;
+// Task #17 revival: combine the manual "Flip Monitor" OSD toggle with the
+// game's own automatic cocktail-cabinet flip request (flip_screen_req,
+// K007342 reg 0x00 bit4) via XOR -- the same way real hardware composes a
+// physical/DIP flip source with a software-driven one onto a single CRT
+// flip signal (flipping both cancels back to normal; either alone flips).
+wire effective_flip = flip_monitor ^ flip_screen_req;
+wire rotate_ccw = effective_flip;
+wire flip       = effective_flip;
 wire video_rotated;
 
 // screen_rotate must consume arcade_video's OUTPUT (post-video_mixer VGA_R/
@@ -1841,6 +2032,19 @@ wire diag_box_soundlatch_bit3 = test_done && verify_done && (h_cnt >= 184 && h_c
 wire diag_box_soundlatch_bit2 = test_done && verify_done && (h_cnt >= 200 && h_cnt < 214) && (v_cnt >= 16) && (v_cnt < 32);
 wire diag_box_soundlatch_bit1 = test_done && verify_done && (h_cnt >= 216 && h_cnt < 230) && (v_cnt >= 16) && (v_cnt < 32);
 wire diag_box_soundlatch_bit0 = test_done && verify_done && (h_cnt >= 232 && h_cnt < 246) && (v_cnt >= 16) && (v_cnt < 32);
+// 2026-08-28: Rack 'Em Up real-hardware-only tile-cache garbage
+// investigation (task #79) used this overlay's `OVERLAY_HIDDEN` mechanism
+// for a live, on-screen `cache_sim_miss_count` readout, since Verilator's
+// own hit-rate numbers didn't predict the severity seen on real hardware.
+// That investigation is complete -- the result (miss count stays low on
+// BOTH games, ruling out a bandwidth-bottleneck theory; a Verilator-side
+// cross-layer aliasing check found the real mechanism instead) is fully
+// written up in project_history/TASKS.md's Rack 'Em Up section and task
+// #79. The diagnostic boxes themselves (a broken small 9-box attempt, plus
+// a working large-box miss-count readout) have been removed now that
+// they've served their purpose -- see that TASKS.md entry if this
+// specific live on-screen technique is needed again for the eventual fix.
+
 wire diag_row2_v = (v_cnt >= 36) && (v_cnt < 52);
 // 2026-08-19, task #8 round 31: retires diag_box_pc_csumfail (long
 // confirmed GREEN, boot execution extensively re-verified since) to
@@ -2458,6 +2662,13 @@ wire diag_row2_flags_bit = 1'b0;
 // arbitration) -- it only short-circuits the three final video mux chains
 // to pass the plain, undecorated video straight through. Flip to 1'b0 to
 // re-enable the overlay for a future debugging session.
+// 2026-08-28: was temporarily enabled for task #79's live cache-miss
+// diagnostic (see project_history/TASKS.md's Rack 'Em Up section for the
+// full investigation and result); those diagnostic boxes have since been
+// removed now that they've served their purpose, and this is back to its
+// normal hidden default. Note every OTHER existing diag_box_* wire in
+// this file is gated on test_done/verify_done, which are dead (never
+// assigned anywhere) -- they stay invisible regardless of this setting.
 localparam OVERLAY_HIDDEN = 1'b1;
 wire [7:0] final_vga_r = OVERLAY_HIDDEN ? vga_r :
                          diag_box3 ? (test_success ? 8'h00 : 8'hFF) :

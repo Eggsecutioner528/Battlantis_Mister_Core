@@ -913,8 +913,35 @@ begin
 				if (TState = 1 and Save_ALU_r = '0' and Auto_Wait_t1 = '0') or
 					(Save_ALU_r = '1' and ALU_OP_r /= "0111") then
 					case Read_To_Reg_r is
-					when "10000" | "10001" | "10010" | "10011" | "10100" | "10101" =>
+					-- 2026-08-17, task #8 investigation: "10111" (destination = A,
+					-- per the B,C,D,E,H,L,DI,A,SP(L),SP(M),1,F,PC(L),PC(M),0 encoding
+					-- documented in this file's own Set_BusB_To comment, and confirmed
+					-- via T80_MCode.vhd's LD r,r' dispatch and the Read_To_Acc override
+					-- both producing this exact value for any A-destination instruction)
+					-- was missing from this case entirely, silently dropping every
+					-- LD A,r / ALU-writeback-to-A result instead of updating ACC.
+					--
+					-- 2026-08-21, task #8 round 102: REVERTED the additive grouping.
+					-- Gemini consult (independently verified against this file before
+					-- acting on it) found that lumping "10111" together with the
+					-- pre-existing "10000".."10101" cases means EVERY plain B/C/D/E/H/L
+					-- register write in the entire Z80 program also spuriously writes
+					-- that same value into ACC (A) -- confirmed on real hardware via a
+					-- same-boot register snapshot: A correctly read 0x02 immediately
+					-- before a 210-byte LDIR (ROM 0x009E) and had become 0x00 immediately
+					-- after it (ROM 0x00AC), with LDIR itself never touching A in real
+					-- Z80 semantics and no jump anywhere in the ROM able to reach 0x00AC
+					-- except by straight-line fall-through from a masking instruction
+					-- that can never produce zero. This one-line grouping bug is a
+					-- strong candidate for the actual, long-hunted root cause of task
+					-- #8's sound silence: it can corrupt A anywhere in the whole Z80
+					-- program, not just this one dispatch routine. Keeping the original
+					-- fix's intent (A DOES need updating on "10111") but no longer
+					-- letting B-L writes bleed into it.
+					when "10111" =>
 						ACC <= Save_Mux;
+					when "10000" | "10001" | "10010" | "10011" | "10100" | "10101" =>
+						null; -- B/C/D/E/H/L writes must NOT also touch ACC
 					when "10110" =>
 						DOUT <= Save_Mux;
 					when "11000" =>

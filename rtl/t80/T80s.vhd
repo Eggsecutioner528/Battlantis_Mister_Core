@@ -95,7 +95,15 @@ entity T80s is
 		OUT0    : in  std_logic := '0';  -- 0 => OUT(C),0, 1 => OUT(C),255
 		A       : out std_logic_vector(15 downto 0);
 		DI      : in std_logic_vector(7 downto 0);
-		DOUT    : out std_logic_vector(7 downto 0)
+		DOUT    : out std_logic_vector(7 downto 0);
+		-- 2026-08-17, task #8 investigation: exposes T80's internal REGS bus
+		-- (IFF2,IFF1,IM,IY,HL',DE',BC',IX,HL,DE,BC,PC,SP,R,I,F',A',F,A) so a
+		-- wrapper can read A and the flags directly, since bus probes alone
+		-- can't see internal register/flag state. Only A (REGS[7:0]) and F
+		-- (REGS[15:8], Zero flag at bit 6 = REGS[14]) are used by this
+		-- project so far -- verified directly against T80.vhd's REGS
+		-- concatenation order and T80_ALU.vhd's Flag_Z=6 constant.
+		REGS    : out std_logic_vector(211 downto 0)
 	);
 end T80s;
 
@@ -181,7 +189,8 @@ begin
 		MC => MCycle,
 		TS => TState,
 		OUT0 => OUT0,
-		IntCycle_n => IntCycle_n
+		IntCycle_n => IntCycle_n,
+		REGS => REGS
 	);
 
 	process (RESET_n, CLK)

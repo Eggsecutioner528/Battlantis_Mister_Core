@@ -31,7 +31,7 @@ module sdram
    input             init,        // reset to initialize RAM
    input             clk,         // clock ~100MHz
    input             sdram_clk_in, // phase-shifted clk for SDRAM_CLK, from PLL outclk_1 --
-                                   // replaces an earlier internal altddio_out 180deg-shift DDR
+                                   // replaces the old internal altddio_out 180deg-shift DDR
                                    // register, which had no SDC timing constraint and could
                                    // route through general fabric with unpredictable added
                                    // delay, eating into the SDRAM read-data setup margin
@@ -194,34 +194,47 @@ always @(posedge clk) begin
 			if(save_we) begin
 				command  <= CMD_WRITE;
 				SDRAM_DQ <= new_wtbt ? new_data : {new_data[7:0], new_data[7:0]};
-				// Extended from STATE_IDLE_2 (2-cycle cooldown) -- confirmed via a
-				// controlled FPGA-internal loopback test that rapid back-to-back
-				// writes fail while isolated single writes succeed. Auto-precharge
-				// (SDRAM_A[10]=1, hardwired for all ops) means the chip's internal
-				// precharge doesn't start until tWR after the write completes; the
-				// next row activation then needs tRP on top of that. STATE_IDLE_4
-				// gives the physical chip more margin for tWR+tRP before the next
-				// CMD_ACTIVE can be issued.
+				// Was STATE_IDLE_2 (2-cycle cooldown before the next CMD_ACTIVE could be
+				// issued) -- confirmed via a controlled FPGA-internal loopback test that
+				// rapid back-to-back writes fail while isolated single writes succeed.
+				// Auto-precharge (SDRAM_A[10]=1, hardwired for all ops) means the chip's
+				// internal precharge doesn't start until tWR after the write completes;
+				// the next row activation then needs tRP on top of that. Extended to
+				// STATE_IDLE_4 to give the physical chip more margin for tWR+tRP before
+				// the next CMD_ACTIVE can be issued.
 				//
-				// Extended again to STATE_IDLE_5: IDLE_4 gave enough margin for
-				// write-then-ACTIVATE, but a focused ModelSim simulation found it
-				// was NOT quite enough specifically for write-then-AUTO_REFRESH -- a
-				// sustained burst of writes under the real ~375-cycle refresh
-				// interval (the pattern a large boot ROM download produces) hit a
-				// reproducible, deterministic tRP violation on the Micron
-				// behavioral model at the same point every run. One additional idle
-				// cycle eliminated it completely (0 violations at up to 200,000
-				// sustained writes in simulation). Real hardware doesn't halt on a
-				// violation like the behavioral model does -- it silently drops or
-				// corrupts the write instead, which is why data downloaded late in
-				// a long boot sequence (after many prior writes) could come back
-				// completely zero from SDRAM while earlier-downloaded data stayed
-				// intact.
+				// Extended again to STATE_IDLE_5 (2026-08-14, Test 225): IDLE_4 gave
+				// enough margin for write-then-ACTIVATE, but a focused ModelSim
+				// simulation (sim_scratch/tb_write_refresh_stress.v) found it was NOT
+				// quite enough specifically for write-then-AUTO_REFRESH -- a sustained
+				// burst of writes under the real ~375-cycle refresh interval (the same
+				// pattern the ~640KB boot ROM download produces) hit a reproducible,
+				// DETERMINISTIC tRP violation on the Micron behavioral model at the
+				// exact same point every run. One additional idle cycle (IDLE_4->
+				// IDLE_5) eliminated it completely: 2000 sustained writes, 0 violations,
+				// vs. guaranteed failure at IDLE_4. Real hardware likely doesn't halt on
+				// a violation like the behavioral model does -- more likely it silently
+				// drops or corrupts the write, which would explain why tile ROM data
+				// (downloaded LAST in the boot sequence, after ~384KB of prior writes)
+				// came back completely zero from SDRAM while earlier-downloaded data
+				// (sprites, CPU, audio) was intact.
 				state    <= STATE_IDLE_5;
 			end
 			else begin
 				command  <= CMD_READ;
 				data_ready_delay[CAS_LATENCY] <= 1;
+				// Test 211 tried extending this to STATE_IDLE_7 (+2 cycles),
+				// mirroring the write-side fix above, to test whether insufficient
+				// row-precharge/activate margin explained k007342's shadow-verify
+				// concurrent-access mismatches. Proven NOT the cause: hardware
+				// testing showed no improvement, and Test 212's simulation (two
+				// independent zero-gap read streams on Port 2 + Port 3
+				// simultaneously, real arbiter + sdram.sv + Micron behavioral
+				// model) came back 1000/1000 PASS even under WORSE contention than
+				// real hardware ever produces -- proving the arbiter/sdram.sv logic
+				// itself is sound and the real-hardware failures are most likely a
+				// physical/electrical effect outside what RTL timing-margin changes
+				// can address. Reverted to the original STATE_IDLE_5 (Test 213).
 				state    <= STATE_IDLE_5;
 			end
 		end

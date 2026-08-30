@@ -2,6 +2,14 @@ module k007342 (
     input  wire        clk,
     input  wire        reset,
 
+    // 2026-08-28: gates whether Layer 1 composites into the video output at
+    // all. See the `layer1_wins` comment further down for why this exists
+    // -- Battlantis.sv derives this from the loaded ROM's own content
+    // (Layer 1 VRAM is real tile data for some games on this hardware,
+    // pure CPU scratch RAM for others, and there's no way to tell from the
+    // chip's own registers alone).
+    input  wire        layer1_enable,
+
     // CPU Interface (16KB memory space to include vreg at 0x2600)
     input  wire [13:0] cpu_addr,
     input  wire [7:0]  cpu_din,
@@ -40,6 +48,26 @@ module k007342 (
     // sprites a second time, offset a full screen height away, so they
     // don't pop in/out abruptly at the top/bottom scroll edge.
     output reg         sprite_wrap_y,
+
+    // Task #17, revived 2026-08-29 for real cocktail-cabinet use: real
+    // K007342 register 0x00 (address 0x2600) bit 4 is the chip's own
+    // dynamic screen-flip request -- Battlantis's own game code writes
+    // this bit when it detects Cocktail cabinet mode (DSW2 cab_opt) and
+    // it's Player 2's turn, so the CRT physically flips 180 degrees to
+    // face whichever player is currently up, without any manual OSD
+    // interaction. Previously dropped (2026-08-24) as unneeded for an
+    // upright-only setup; revived now that real cocktail-cabinet
+    // deployment is a real goal. Exposed here as a combinational read of
+    // `regs[0]` (already latched below, same write path as int_enabled)
+    // for Battlantis.sv to combine with the existing manual "Flip
+    // Monitor" OSD toggle.
+    output wire        flip_screen_req,
+
+    // Task #18 (2026-08-16, retired): K007342 register 0x02's "32 columns"
+    // per-column scroll mode was checked via a sticky diagnostic across
+    // several full sessions of real gameplay and never once selected --
+    // closed as not utilized by this game's program, no longer implemented
+    // or tracked here.
 
     // Shadow SDRAM verification (2026-08-13, Stage 1 of the tile-ROM/SDRAM
     // migration plan): Port 2 was reserved for k007342 from the start of the
@@ -140,6 +168,32 @@ module k007342 (
     //   (real hardware behaviour confirmed in MAME).
     // ==============================================================================
     (* ramstyle = "M10K" *) reg [7:0] vram [0:16383];
+    // 2026-08-29, task #83: on real Cyclone V silicon, M10K block RAM has no
+    // guaranteed all-zero (or any particular) power-up content -- unlike
+    // discrete SRAM, whose uninitialized state is genuinely random per real
+    // reference footage, FPGA block RAM appears to settle into a fixed,
+    // repeating bit pattern on configuration. Read as tile-code/attribute
+    // bytes before the CPU's boot code has written real VRAM content, that
+    // repeating pattern produced a visible, structured (not random-looking)
+    // column artifact for roughly the first second after a fresh core load
+    // -- confirmed by direct comparison against real PCB reference footage,
+    // whose own equivalent boot-time garbage is genuinely random/chaotic.
+    // This `initial` block (same pattern already proven below for
+    // `scroll_ram`) gives Quartus an explicit all-zero .mif for these M10K
+    // blocks, so VRAM reads as blank instead of a garbage pattern until the
+    // CPU writes real content -- costs no additional M10K blocks, only
+    // changes their power-on content.
+    // Split into four sub-5000-iteration loops: Quartus's Verilog HDL
+    // elaborator rejects any single `for` loop exceeding 5000 iterations
+    // (Error 10106), so a single 0-16383 loop doesn't synthesize even
+    // though it's well within what Verilator (and the intent) allows.
+    initial begin
+        integer vram_init_i;
+        for (vram_init_i = 0; vram_init_i < 4096; vram_init_i = vram_init_i + 1) vram[vram_init_i] = 8'h00;
+        for (vram_init_i = 4096; vram_init_i < 8192; vram_init_i = vram_init_i + 1) vram[vram_init_i] = 8'h00;
+        for (vram_init_i = 8192; vram_init_i < 12288; vram_init_i = vram_init_i + 1) vram[vram_init_i] = 8'h00;
+        for (vram_init_i = 12288; vram_init_i < 16384; vram_init_i = vram_init_i + 1) vram[vram_init_i] = 8'h00;
+    end
 
     // Port A: CPU read/write
     reg [7:0] vram_dout;
@@ -156,6 +210,15 @@ module k007342 (
     reg [7:0] regs [0:7]; // K007342 control registers (write-only from CPU side)
     // K007342 registers are write-only. Reading 0x2600-0x2607 returns VRAM[0]-VRAM[7] due to incomplete address decoding.
     assign cpu_dout = vram_dout;
+    // Task #17 revival: regs[0] bit 4 is the real chip's dynamic
+    // screen-flip request (see the flip_screen_req port comment above).
+    // regs[] has no explicit reset value (matches int_enabled's own
+    // regs[0]-derived write path immediately below), but Cyclone V's
+    // ALM-based flip-flops -- unlike M10K block RAM -- do have a
+    // documented, guaranteed power-on-reset state of 0 with no explicit
+    // reset needed, so this doesn't carry the same uninitialized-content
+    // risk task #83 found for actual block RAM.
+    assign flip_screen_req = regs[0][4];
 
     // ==============================================================================
     // PER-ROW SCROLL RAM  (512 bytes)
@@ -258,7 +321,22 @@ module k007342 (
     reg [17:0] tap_addr;
     reg [7:0]  tap_data;
     reg        tap_valid;
-    
+    // 2026-08-29, cache-partition (see vid_tile_index's own comment above
+    // for the full design): tap_addr is a one-cycle-delayed snapshot of
+    // vid_tile_addr, captured at a specific fetch_state (8 for Layer 0,
+    // 26 for Layer 1) -- by the time it's read back out here, fetch_state
+    // has already moved on, so which layer it came from can't be
+    // re-derived from the CURRENT fetch_state the way the live read path
+    // does. Captured alongside tap_addr at both capture points instead.
+    reg        tap_layer;
+    // 2026-08-29, cache-partition: which physical cache half the live read
+    // path (vid_tile_index) should use. Set inside the fetch-state case
+    // statement below (0 at state 0, layer1_enable at state 18) rather
+    // than computed combinationally here -- see vid_tile_index's comment
+    // for why a live comparison in this position broke Quartus RAM
+    // inference for the whole tile_cache array.
+    reg        cache_layer_reg;
+
     // Pipeline delays for memory reads
     reg [7:0] vid_vram_dout;
     always @(posedge clk) vid_vram_dout <= vram[{vram_bank, vid_vram_addr[12:0]}];
@@ -274,8 +352,65 @@ module k007342 (
     wire [7:0] vid_tile_dout_reg;
 
     wire [12:0] vid_tile_key   = vid_tile_addr[17:5];
-    wire [10:0] vid_tile_index = vid_tile_key[10:0];
-    wire [1:0]  vid_tile_tag   = vid_tile_key[12:11];
+    // 2026-08-29, tasks #74/#79/#80: partition the shared tile cache by
+    // layer so Layer 0 and Layer 1 can no longer evict each other's
+    // entries (the leading theory for Rack 'Em Up's persistent garbage
+    // and, less certainly, Battlantis's own same-layer aliasing symptoms).
+    // The physical index reserves its top bit to sort entries into two
+    // disjoint 1024-entry halves, one per layer -- same total physical
+    // cache size (2048 entries), each half still a fully lossless mapping
+    // of its own 8192-key address space (1024 entries x 8-way tag, vs the
+    // original single namespace's 2048 entries x 4-way tag for BOTH
+    // layers combined), at the cost of a wider 3-bit tag absorbing the
+    // index bit the layer-select bit displaced. This guarantees zero
+    // cross-layer physical-slot collisions (the original shared scheme
+    // has no such guarantee at all, and a colliding read returns another
+    // layer's raw tile bytes for a frame -- real visible corruption, not
+    // just a slower miss), in exchange for a real per-layer capacity cut.
+    //
+    // Applied UNCONDITIONALLY (not gated on layer1_enable) -- an earlier
+    // version branched the whole index/tag formula on layer1_enable via a
+    // ternary, specifically to make this a byte-for-byte no-op for any
+    // game that doesn't use Layer 1 (Battlantis: layer1_enable=0 always).
+    // That ternary broke real Quartus compilation: it adds enough
+    // combinational logic in front of tile_cache/tile_cache_tag's read
+    // address that Quartus stopped recognizing the established "one
+    // conditional synchronous read" M10K-inference pattern (the same
+    // proven pattern documented at this file's dedicated tile_cache
+    // read/write block below) and fell back to trying to build the 64KB
+    // array from discrete registers -- Error (276003), doesn't fit the
+    // device. This project has hit this exact failure class before
+    // (debugging_log.md Test 163: extra combinational logic ahead of an
+    // otherwise-clean RAM read silently breaks inference). The
+    // unconditional form below keeps the index/tag purely a slice-and-
+    // concatenate of `vid_tile_key`/`tap_tile_key`. For Battlantis
+    // (layer1_enable=0, `cache_layer_reg` always 0), this means the cache
+    // behaves as a real 1024-entry half rather than the full 2048 -- NOT
+    // a strict mathematical no-op like the reverted ternary version was,
+    // but Verilator-measured at a matched 60M-cycle run to be no worse
+    // (926187/937500 = 98.79% here vs. 925895/937500 = 98.76% for the
+    // true pre-partition baseline at the same run length -- statistically
+    // a wash, not a regression).
+    //
+    // `cache_layer_reg` (declared with the other fetch-pipeline registers
+    // above) is a genuine register, not a live comparison -- a first
+    // attempt used `layer1_enable && (fetch_state >= 6'd18)` directly as
+    // a combinational wire, and THAT (not the earlier ternary) turned out
+    // to be the actual Quartus RAM-inference breaker: even one bit of
+    // comparator logic sitting directly in tile_cache's read address was
+    // enough to defeat inference of the 64KB array. Fixed by moving the
+    // `>= 18` comparison into the SAME fetch-state case statement that
+    // already latches vid_tile_addr (set to 0 at state 0, to
+    // layer1_enable at state 18 -- see that case statement below), so a
+    // clean register feeds the read address instead of raw comparator
+    // output. Safe because nothing ever consumes vid_tile_dout during
+    // states 18-23 (the only window where the register's value would
+    // otherwise lag the live comparison by up to a few cycles) -- the
+    // real Layer 1 reads it must be correct for don't happen until state
+    // 26 at the earliest, well after the state-18 update lands.
+    wire        cache_layer_bit = cache_layer_reg;
+    wire [10:0] vid_tile_index  = {cache_layer_bit, vid_tile_key[9:0]};
+    wire [2:0]  vid_tile_tag    = {vid_tile_key[12:11], vid_tile_key[10]};
 
     wire [7:0] vid_tile_dout = vid_tile_dout_reg;
 
@@ -288,6 +423,7 @@ module k007342 (
     reg [2:0] layer0_bank;
     reg [2:0] layer1_bank;
 
+    integer regs_reset_i;
     always @(posedge clk) begin
         if (reset) begin
             int_enabled <= 1'b0;
@@ -298,6 +434,21 @@ module k007342 (
             layer1_scroll_x <= 0;
             layer1_scroll_y <= 0;
             sprite_wrap_y <= 1'b0;
+            // 2026-08-29, task #83 follow-up: `regs[]` (and therefore
+            // flip_screen_req = regs[0][4], see that port's comment) had no
+            // reset value -- this assumed Cyclone V flip-flops reliably
+            // power up to 0, an unverified real-hardware assumption of
+            // exactly the same class this project has already been burned
+            // by tonight for block RAM. If regs[0][4] powers up as 1 on
+            // real silicon, flip_screen_req is stuck asserted from boot,
+            // which plausibly explains a real-hardware-only "screen split
+            // into repeating columns" regression that appeared only after
+            // this register was first read for anything (the cocktail-flip
+            // feature) -- a structural symptom that fits a stuck video
+            // rotate/flip signal far better than sprite/VRAM content ever
+            // did. Explicit reset removes the dependency on any assumed
+            // power-up value entirely.
+            for (regs_reset_i = 0; regs_reset_i < 8; regs_reset_i = regs_reset_i + 1) regs[regs_reset_i] <= 8'h00;
         end else begin
             if (cpu_we && cpu_addr >= 14'h2600 && cpu_addr <= 14'h2607) begin
                 regs[cpu_addr[2:0]] <= cpu_din;
@@ -371,7 +522,10 @@ module k007342 (
             // Reads happen 2 states after the address is set (1-cycle BRAM latency
             // + 1 pipeline register in vid_vram_dout / vid_tile_dout_reg).
 
-            0:  vid_vram_addr <= layer0_vram_offset + 14'h0800; // set addr: Layer 0 tile code (LSB)
+            0:  begin
+                    vid_vram_addr <= layer0_vram_offset + 14'h0800; // set addr: Layer 0 tile code (LSB)
+                    cache_layer_reg <= 1'b0;
+                end
             2:  layer0_tile   <= vid_vram_dout;                  // latch tile code
             3:  vid_vram_addr <= layer0_vram_offset + 14'h0000; // set addr: Layer 0 attribute byte
             5:  layer0_attr   <= vid_vram_dout;               // Read all 4 ROM bytes for this tile's current scanline row:
@@ -386,6 +540,7 @@ module k007342 (
                     tap_addr <= vid_tile_addr;
                     tap_data <= vid_tile_dout;
                     tap_valid <= 1'b1;
+                    tap_layer <= 1'b0; // Layer 0's own tap capture
                 end
             9:  vid_tile_addr <= {layer0_attr[3:0], layer0_attr[6], layer0_tile, layer0_scrolled_v[2:0], 2'd1 ^ byte_xor};
             11: layer0_data[1] <= vid_tile_dout; // pixels 2-3
@@ -397,17 +552,52 @@ module k007342 (
             // ------------------------------------------------------------------
             // LAYER 1 FETCH  (states 18–35) — identical pipeline to Layer 0
             // ------------------------------------------------------------------
-            // NOTE: In Battlantis, Layer 1 VRAM is repurposed as CPU work RAM
-            // during gameplay. Layer 1 is NOT rendered (see final_pix below).
-            // These fetches still run every scanline but their output is unused.
+            // 2026-08-28: found that this pipeline's read side (vid_tile_addr/
+            // vid_tile_dout, both shared with Layer 0) was always correctly
+            // computed, but the tile_cache's MISS/FILL-TRIGGER detection only
+            // ever looked at `tap_addr`, which was only ever captured during
+            // Layer 0's own fetch (state 8) -- meaning Layer 1 could never
+            // trigger its own cache fill. It could only "borrow" whatever
+            // Layer 0 happened to have already cached at the same 2048-entry
+            // index+tag, or miss and get a safe blank byte -- never its own
+            // real content. Fixed by mirroring the same tap capture here at
+            // state 26 (Layer 1's own equivalent of Layer 0's state 8), so
+            // Layer 1 gets independent fill-trigger detection through the
+            // same shared cache/fill machinery.
+            //
+            // 2026-08-28, same day, gated on layer1_enable: this tap capture
+            // is a SHARED resource with Layer 0 (one fill state machine, one
+            // 2048-entry cache) -- for a game like Battlantis where Layer 1
+            // never contributes real pixels at all, letting its fetches keep
+            // triggering real cache fills anyway was a real regression, not
+            // a theoretical one: confirmed on real hardware as black boxes
+            // appearing and changing size across multiple stages (Level 1,
+            // Stage 11) immediately after this fix was first deployed
+            // without this gate. Layer 1's fetch pipeline still runs every
+            // scanline regardless (states 18-35 unconditionally), but now
+            // only feeds the shared cache/fill machinery when layer1_enable
+            // is actually true -- for Battlantis this makes Layer 1's tap
+            // capture a complete no-op again, exactly matching the original,
+            // known-good behavior before any of this investigation started.
 
-            18: vid_vram_addr <= layer1_vram_offset + 14'h1800; // Layer 1 tile code
+            18: begin
+                    vid_vram_addr <= layer1_vram_offset + 14'h1800; // Layer 1 tile code
+                    cache_layer_reg <= layer1_enable;
+                end
             20: layer1_tile   <= vid_vram_dout;
             21: vid_vram_addr <= layer1_vram_offset + 14'h1000; // Layer 1 attribute
             23: layer1_attr   <= vid_vram_dout;
-            
+
             24: vid_tile_addr <= {layer1_attr[3:0], layer1_attr[6], layer1_tile, layer1_scrolled_v[2:0], 2'd0 ^ byte_xor};
-            26: layer1_data[0] <= vid_tile_dout;
+            26: begin
+                    layer1_data[0] <= vid_tile_dout;
+                    if (layer1_enable) begin
+                        tap_addr <= vid_tile_addr;
+                        tap_data <= vid_tile_dout;
+                        tap_valid <= 1'b1;
+                        tap_layer <= 1'b1; // Layer 1's own tap capture
+                    end
+                end
             27: vid_tile_addr <= {layer1_attr[3:0], layer1_attr[6], layer1_tile, layer1_scrolled_v[2:0], 2'd1 ^ byte_xor};
             29: layer1_data[1] <= vid_tile_dout;
             30: vid_tile_addr <= {layer1_attr[3:0], layer1_attr[6], layer1_tile, layer1_scrolled_v[2:0], 2'd2 ^ byte_xor};
@@ -473,8 +663,16 @@ module k007342 (
     wire [7:0]  sel_byte1    = use_next1 ? layer1_data[adj_byte1] : disp1[adj_byte1];
     wire [3:0]  layer1_pix   = adj_nib1 ? sel_byte1[3:0] : sel_byte1[7:4];
 
-    // Battlantis uses only Layer 0 for background graphics.
-    wire [3:0] final_pix = layer0_pix;
+    // 2026-08-28: Layer 1 re-enabled as a real transparent-on-zero overlay
+    // above Layer 0, now that the cache fill-trigger gap above is fixed
+    // (this exact compositing logic was tried once already and produced a
+    // uniform garbage-glyph overlay on real hardware -- root-caused
+    // afterward to the fill-trigger gap, not this mux itself; re-verify
+    // carefully in Verilator before trusting this on real hardware again).
+    wire layer1_priority = layer1_attr[7];
+    wire        layer1_wins  = layer1_enable && (layer1_pix != 4'd0);
+    wire [3:0]  final_pix    = layer1_wins ? layer1_pix : layer0_pix;
+    wire        final_priority = layer1_wins ? layer1_priority : layer0_priority;
 
     // MAME's battlnts.cpp tile_callback sets `color = 0` for all tiles, so all
     // background tiles use palette bank 0. This matches the real hardware.
@@ -483,10 +681,10 @@ module k007342 (
     // layer0_priority (attr[7]): when high, Layer 0 renders on TOP of sprites.
     wire layer0_priority = layer0_attr[7];
 
-    // Output: {priority=0, palette_bank[2:0], colour_index[3:0]}
+    // Output: {priority, palette_bank[2:0], colour_index[3:0]}.
     always @(posedge clk) begin
         if (ce_pix) begin
-            pixel_color <= {1'b0, final_pal, final_pix};
+            pixel_color <= {final_priority, final_pal, final_pix};
         end
     end
 
@@ -517,17 +715,31 @@ module k007342 (
     // where it used to be declared, above.
     //
     // NO STALLING: a cache miss never pauses the video pipeline (would risk
-    // breaking sync). On a miss, the slot keeps whatever was last written
-    // there (stale data from a previous tenant, or zero if never filled)
-    // until the background fill completes -- a rare, self-correcting,
-    // single-frame visual imperfection, not a timing risk.
+    // breaking sync). STALE COMMENT UPDATED (2026-08-29, task #80
+    // investigation): this used to describe the slot holding whatever
+    // stale data a previous tenant left there on a miss, but Task #25
+    // (2026-08-27) deliberately replaced that with a safe blank (8'h00)
+    // instead -- holding stale data was found to show a DIFFERENT,
+    // unrelated tile's bytes bleeding through (worse than a blank), since
+    // two different tiles regularly alias to the same 11-bit index. See
+    // the real miss-path logic further down (`tile_cache_dout <= 8'h00`)
+    // for the actual current behavior; a rare, self-correcting,
+    // single-frame black patch, not a timing risk.
     //
     // Cache key = {palette, tile index} (13 bits, address bits [17:5] with
-    // row/byte stripped): 2048-entry direct-mapped, index = key[10:0],
-    // tag = key[12:11].
+    // row/byte stripped). 2026-08-29, tasks #74/#79/#80: STALE COMMENT
+    // UPDATED -- this used to be a single flat 2048-entry direct-mapped
+    // namespace shared by both layers (index = key[10:0], tag = key
+    // [12:11]). Now partitioned by layer (see vid_tile_index/vid_tile_tag
+    // above for the full design): physical index = {cache_layer_bit,
+    // key[9:0]} (11 bits, still 2048 total physical entries), tag =
+    // {key[12:11], key[10]} (widened 2->3 bits to absorb the index bit
+    // the partition bit displaced). For any game with layer1_enable=0
+    // (Battlantis), cache_layer_bit is always 0 and this reduces
+    // byte-for-byte to the original single-namespace scheme.
     localparam TILE_CACHE_ENTRIES = 2048;
     (* ramstyle = "M10K" *) reg [7:0] tile_cache [0:TILE_CACHE_ENTRIES*32-1]; // 64KB: {index[10:0], offset[4:0]}
-    reg [1:0]  tile_cache_tag [0:TILE_CACHE_ENTRIES-1];
+    reg [2:0]  tile_cache_tag [0:TILE_CACHE_ENTRIES-1]; // widened 2->3 bits for the cache-partition scheme (see vid_tile_index's comment)
     reg        tile_cache_valid [0:TILE_CACHE_ENTRIES-1];
 
     // Miss/fill-trigger detection reuses the tap_addr stream (one genuinely-
@@ -535,8 +747,17 @@ module k007342 (
     // independent of the real read path above, which uses vid_tile_addr
     // directly since it can't wait for tap's one-cycle-later snapshot.
     wire [12:0] tap_tile_key   = tap_addr[17:5];
-    wire [10:0] tap_tile_index = tap_tile_key[10:0];
-    wire [1:0]  tap_tile_tag   = tap_tile_key[12:11];
+    // Same unconditional (not layer1_enable-branched -- see
+    // vid_tile_index's comment for why) cache-partition scheme as
+    // vid_tile_index/vid_tile_tag above, using the captured `tap_layer`
+    // bit (recorded at the moment tap_addr itself was captured) instead
+    // of the live fetch_state, since fetch_state has already moved on by
+    // the time this is read. `tap_layer` is only ever set to 1 at the
+    // Layer 1 capture point, itself gated on layer1_enable, so it's
+    // already guaranteed 0 for any game that doesn't use Layer 1 --
+    // consistent with `cache_layer_bit` above.
+    wire [10:0] tap_tile_index = {tap_layer, tap_tile_key[9:0]};
+    wire [2:0]  tap_tile_tag   = {tap_tile_key[12:11], tap_tile_key[10]};
     wire        tap_tile_claims_hit = tile_cache_valid[tap_tile_index] && (tile_cache_tag[tap_tile_index] == tap_tile_tag);
 
     // --- Background fill state machine (Port 2: request/wait, 32 bytes per miss) ---
@@ -546,7 +767,7 @@ module k007342 (
 
     reg [1:0]  fill_state;
     reg [10:0] fill_index;
-    reg [1:0]  fill_tag;
+    reg [2:0]  fill_tag; // widened 2->3 bits for the cache-partition scheme (see vid_tile_index's comment)
     reg [4:0]  fill_offset;
     reg [24:0] fill_sdram_addr_reg;
     reg        fill_req_reg;
@@ -618,10 +839,30 @@ module k007342 (
             last_fill_byte <= shadow_sdram_dout;
             fill_byte_ever_seen <= fill_byte_ever_seen | shadow_sdram_dout;
         end
-        if (tile_cache_write_en && (tile_cache_write_addr == tile_cache_read_addr))
+        // Task #25 (2026-08-27) fix: this used to unconditionally return
+        // tile_cache[tile_cache_read_addr] whenever it wasn't forwarding a
+        // same-cycle fill write, with no check that the resident data at
+        // this index actually belongs to the tile currently being
+        // requested. Directly measured (see project_history/TASKS.md
+        // Round 164) that two different tiles regularly alias to the same
+        // 11-bit index (2048 entries, 2-bit tag -- only 4 tiles can share
+        // an index without collision, and this ROM's real access pattern
+        // hits that limit often, sometimes multiple times within a single
+        // frame), and that a miss evicts the old tile immediately, well
+        // before the new one's multi-cycle SDRAM fill completes -- during
+        // that window the old code would show whichever unrelated tile's
+        // bytes happened to still be sitting in the slot. Now: only the
+        // same-cycle write-forwarding path (with the fill genuinely being
+        // for the SAME tile the display wants, not just the same index)
+        // or a resident, tag-matched entry are trusted; anything else
+        // returns a safe blank byte instead of unverified data.
+        if (tile_cache_write_en && (tile_cache_write_addr == tile_cache_read_addr) &&
+            (fill_tag == vid_tile_tag))
             tile_cache_dout <= shadow_sdram_dout;
-        else
+        else if (tile_cache_valid[vid_tile_index] && (tile_cache_tag[vid_tile_index] == vid_tile_tag))
             tile_cache_dout <= tile_cache[tile_cache_read_addr];
+        else
+            tile_cache_dout <= 8'h00;
     end
     assign vid_tile_dout_reg = tile_cache_dout;
 
@@ -646,7 +887,13 @@ module k007342 (
             // real fill, which is fine for a diagnostic-only value.
             last_fill_byte_stable <= 8'd0;
             fill_byte_ever_seen_stable <= 8'd0; // same ownership split as last_fill_byte above
-            for (ci = 0; ci < TILE_CACHE_ENTRIES; ci = ci + 1) tile_cache_valid[ci] <= 1'b0;
+            // Blocking assignment here (Verilator requires this for an
+            // array clear inside a for loop; nonblocking arrays in loops
+            // aren't supported). Behaviorally identical to the original
+            // nonblocking form: this is the only writer of tile_cache_valid
+            // in this reset branch, nothing else reads or writes it at this
+            // same edge, so there is no blocking/nonblocking ordering hazard.
+            for (ci = 0; ci < TILE_CACHE_ENTRIES; ci = ci + 1) tile_cache_valid[ci] = 1'b0;
         end else begin
             if (v_cnt == 9'd0 && !cache_last_v_cnt_0) begin
                 last_checked_addr_stable <= tile_last_checked_addr;
@@ -698,7 +945,15 @@ module k007342 (
                     // see the port3_busy port comment above. With sprites now
                     // fully static BRAM (rtl/k007420.v), Port 3 is idle during
                     // real gameplay anyway, so this should rarely even wait.
-                    fill_sdram_addr_reg <= {7'd0, fill_tag, fill_index, fill_offset} + 25'h60000; // relative -> absolute (tile ROM base)
+                    // 2026-08-29, cache-partition: fill_index[10] is always
+                    // the layer-select bit (see vid_tile_index's comment --
+                    // the partition scheme applies unconditionally now, not
+                    // branched on layer1_enable), NOT part of the real tile
+                    // ROM address -- only fill_index[9:0] combines with the
+                    // full 3-bit fill_tag to reconstruct the true 13-bit
+                    // key. Including fill_index[10] here would fetch from a
+                    // completely wrong, shifted SDRAM address.
+                    fill_sdram_addr_reg <= {7'd0, fill_tag, fill_index[9:0], fill_offset} + 25'h60000; // relative -> absolute (tile ROM base)
                     fill_req_reg <= 1'b1;
                     fill_wait_cycles <= 16'd0;
                     fill_state <= FILL_WAIT;

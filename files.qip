@@ -3,6 +3,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram_arbiter.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cos.sv
 set_global_assignment -name SYSTEMVERILOG_FILE Battlantis.sv
 set_global_assignment -name VERILOG_FILE rtl/mc6809/mc6809i.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/hd6309/hd6309i.v
 set_global_assignment -name VERILOG_FILE rtl/k007342.v
 set_global_assignment -name VERILOG_FILE rtl/k007420.v
 set_global_assignment -name VHDL_FILE rtl/t80/T80.vhd

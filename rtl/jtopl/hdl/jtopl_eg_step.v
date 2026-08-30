@@ -102,8 +102,34 @@ always @(*) begin : rate_step
 end
 
 assign cnt_lsb = cnt[0];
+
+// 2026-08-20, task #8 round 68: real, verified, deterministic bug found and
+// fixed (not a Cyclone V synthesis artifact, not metastability). At the
+// maximum attack rate (rate[5:2]==4'hf, the same condition already
+// special-cased above for step_idx), mux_sel = rate[5:2]+1 = 16 during
+// ATTACK -- outside the case statement's explicit 0-10 range above, so it
+// falls to `default: cnt=eg_cnt[2:0]`, selecting eg_cnt's own bit 0. Since
+// this engine time-multiplexes exactly 18 operator slots round-robin
+// (SLOTS=18 throughout jtopl_eg.v), this same slot's own cnt[0]/cnt_in
+// comparison happens exactly 18 cenop cycles apart -- and because 18 is
+// even while bit 0 has period 2, that comparison can NEVER see a
+// difference: verified computationally (zero transitions in a direct
+// simulation of this exact bit-vs-18-cycle-delay relationship, vs. every
+// other bit position 1-13 all showing real, working transitions). This
+// structurally prevents sum_up from ever firing for this one specific,
+// narrow rate/attack combination -- independent of any FPGA vendor,
+// device, or synthesis tool -- which is exactly the parameter combination
+// Battlantis's own real channel-0 note lands on (AR=15 saturates rate to
+// 63 given this note's keycode=0). Fixed the same way the step_idx special
+// case above already implies real hardware intent for maximum attack rate
+// (unconditional maximum step every opportunity): force sum_up true too,
+// under the identical guard, rather than relying on a toggle-detection
+// scheme that cannot work for this one case. Every other rate/mux_sel
+// combination (i.e. every case already explicitly enumerated above) is
+// completely unaffected.
+wire max_attack_case = rate[5:2]==4'hf && attack;
 always @(*) begin
-    sum_up = cnt[0] != cnt_in;
+    sum_up = max_attack_case ? 1'b1 : (cnt[0] != cnt_in);
 end
 
 endmodule // eg_step

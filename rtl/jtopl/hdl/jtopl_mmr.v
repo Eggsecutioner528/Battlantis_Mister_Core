@@ -31,6 +31,7 @@ module jtopl_mmr(
     output      [ 1:0]  group,
     output              op,
     output      [17:0]  slot,
+    output      [ 2:0]  subslot,   // 2026-08-19, task #8 round 40: diagnostic use only
     output  reg         rhy_en,
     // Timers
     output  reg [ 7:0]  value_A,
@@ -66,7 +67,14 @@ module jtopl_mmr(
     output      [ 1:0]  ksl_IV,
     // Operator configuration
     output      [ 2:0]  fb_I,
-    output              con_I
+    output              con_I,
+
+    // 2026-08-20, task #8 round 79: see jtopl_reg.v's identical port
+    // comment for the full reasoning.
+    output              dbg_ar_dr_applied_ch0car,
+    output              dbg_up_ar_dr_raw,
+    output              dbg_ar_dr_clobbered,
+    output              dbg_pending_was_ch0car
 );
 
 parameter OPL_TYPE=1;
@@ -251,6 +259,7 @@ jtopl_reg #(.OPL_TYPE(OPL_TYPE)) u_reg(
     .group      ( group         ),
     .op         ( op            ),
     .slot       ( slot          ),
+    .subslot    ( subslot       ),
 
     .sel_ch     ( sel_ch        ),
     .sel_group  ( sel_group     ),     // group to update
@@ -294,7 +303,11 @@ jtopl_reg #(.OPL_TYPE(OPL_TYPE)) u_reg(
     .tl_IV      ( tl_IV         ),
     // Timbre - Neiro
     .fb_I       ( fb_I          ),
-    .con_I      ( con_I         )
+    .con_I      ( con_I         ),
+    .dbg_ar_dr_applied_ch0car ( dbg_ar_dr_applied_ch0car ),
+    .dbg_up_ar_dr_raw ( dbg_up_ar_dr_raw ),
+    .dbg_ar_dr_clobbered ( dbg_ar_dr_clobbered ),
+    .dbg_pending_was_ch0car ( dbg_pending_was_ch0car )
 );
 
 endmodule

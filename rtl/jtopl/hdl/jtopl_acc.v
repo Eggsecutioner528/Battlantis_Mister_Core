@@ -44,30 +44,27 @@ assign rhy2x  = rhy_en && |slot[5:0]; // rhythm ops at slots 0-5; [7:2] missed H
 assign sum_en = op | con;
 assign op2x   = rhy2x ? {op_result, 1'b0} : {op_result[12],op_result};
 
-// ===== Per-channel volume (GLOBAL test build; same for all games) =====
-// /256 fixed-point gain: 256=0dB 228=-1 203=-2 181=-3 161=-4 144=-5 128=-6dB
-// Carriers land at accumulator slots via op N -> slot (N+6) mod 18:
-//   ch0->slot9  ch1->slot10  ch2->slot11  ch3->slot15  (drums-> slots0-5)
-localparam [8:0] VOL_CH0 = 9'd256; // ch0   0 dB
-localparam [8:0] VOL_CH1 = 9'd181; // ch1  -3 dB
-localparam [8:0] VOL_CH2 = 9'd203; // ch2  -2 dB
-localparam [8:0] VOL_CH3 = 9'd203; // ch3  -2 dB
-reg [8:0] chvol;
-always @(*) case(1'b1)
-    slot[ 9]: chvol = VOL_CH0;
-    slot[10]: chvol = VOL_CH1;
-    slot[11]: chvol = VOL_CH2;
-    slot[15]: chvol = VOL_CH3;
-    default:  chvol = 9'd256; // 0 dB (drums + unused)
-endcase
-wire signed [23:0] op_vol_full = op2x * $signed({1'b0, chvol});
-wire signed [13:0] op2x_vol     = op_vol_full[21:8]; // /256, unity when chvol=256
+// 2026-08-23, task #8 round 134: REMOVED a non-chip-accurate, hardcoded
+// per-channel volume table that was present in this file since this
+// repo's very first commit (2026-08-16), labeled in its own comment as a
+// "GLOBAL test build" -- it applied an arbitrary, unexplained gain
+// (0dB/-3dB/-2dB/-2dB) to channels 0-3 specifically (identified by which
+// accumulator slot each channel's carrier lands on), leaving channels
+// 4-8 and the rhythm/drum slots untouched. Real YM3812 hardware has no
+// such per-channel scaling -- every channel plays at whatever level its
+// own TL/envelope computes, nothing more. This silently biased both
+// chips' channel balance for the entire session without ever being
+// identified or explained, and is exactly the kind of hardcoded
+// special-case this project's own standing practice says to avoid in
+// favor of genuine, chip-accurate behavior. Restored to plain unity gain
+// for every channel (feeding `op2x` straight into the accumulator, no
+// scaling stage at all).
 
 // Continuous output
 jtopl_single_acc #(.INW(14),.OUTW(16))  u_acc(
     .clk        ( clk       ),
     .cenop      ( cenop     ),
-    .op_result  ( op2x_vol  ),
+    .op_result  ( op2x      ),
     .sum_en     ( sum_en    ),
     .zero       ( zero      ),
     .snd        ( snd       )

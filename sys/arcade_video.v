@@ -265,7 +265,7 @@ reg [11:0] hsz = 320, vsz = 240;
 reg [11:0] bwidth;
 reg [22:0] bufsize;
 always @(posedge CLK_VIDEO) begin
-	reg [11:0] hcnt = 0, vcnt = 0;
+	reg [11:0] hcnt, vcnt;
 	reg old_vs, old_de;
 
 	if(CE_PIXEL) begin
@@ -297,7 +297,7 @@ reg [22:0] ram_addr, next_addr;
 reg [31:0] ram_data;
 reg        ram_wr;
 always @(posedge CLK_VIDEO) begin
-	reg [13:0] hcnt = 0;
+	reg [13:0] hcnt;
 	reg old_vs, old_de;
 
 	ram_wr <= 0;
