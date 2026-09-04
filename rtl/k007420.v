@@ -37,7 +37,7 @@ module k007420 (
     output wire        sprite_active,
 
     // SDRAM Sprite ROM Interface (Port 3)
-    output reg         sprite_sdram_req,
+    output wire        sprite_sdram_req,
     output wire [24:0] sprite_sdram_addr,
     input  wire [7:0]  sprite_sdram_dout,
     input  wire        sprite_sdram_ready,
@@ -488,9 +488,17 @@ module k007420 (
     end
     assign frame_has_nonzero_out = frame_has_nonzero;
 
-    assign sprite_sdram_addr = 25'h20000 + {7'd0, calc_rom_addr};
     assign diag_sdram_req_count = diag_req_count;
     assign diag_sdram_ready_count = diag_ready_count;
+    // Round 196 (2026-09-03): sprite_sdram_req/addr are now driven for real
+    // by the sprite cache's own fill state machine (see the SPRITE ROM
+    // CACHE section below) -- no longer a diagnostic-only probe. The old
+    // SIM_SPRITE_SDRAM_PROBE scaffolding (and the ~11% "reliability"
+    // measurement it produced) is retired along with the full 256KB
+    // sprite_rom_bram mirror it existed to double-check; see TASKS.md
+    // Round 195/196 for why that measurement was never trustworthy anyway
+    // (a since-identified Verilator harness artifact specific to this
+    // module's ioctl_wr path, not a real hardware finding).
 
     // ==============================================================================
     // SPRITE RAM (512 Bytes True Dual-Port BRAM)
@@ -560,10 +568,19 @@ module k007420 (
     // {spr_flags[1:0], oam_dout} (the raw zoom byte about to be latched
     // into spr_zoom that same cycle), landing in the registered outputs
     // one cycle later.
-    (* ramstyle = "M10K" *) reg [12:0] tile_bound1_rom [0:1023];
-    (* ramstyle = "M10K" *) reg [12:0] tile_bound2_rom [0:1023];
-    (* ramstyle = "M10K" *) reg [12:0] tile_bound3_rom [0:1023];
-    (* ramstyle = "M10K" *) reg [12:0] tile_bound4_rom [0:1023];
+    // 2026-09-03, task #77: widened these ROM words from [12:0] to [15:0].
+    // The .hex source files are plain 4-hex-digit-per-line text (max real
+    // value 0x1000, confirmed by reading all four files directly -- well
+    // within 13 bits), but $readmemh warned every load as a 16-bit-text-
+    // to-13-bit-target truncation regardless, since it judges the literal's
+    // nominal width from its digit count, not its actual magnitude. Widening
+    // the ROM to match removes the warning with zero data-width change for
+    // any real stored value; the downstream [12:0] slice below keeps
+    // everything else (comparisons against `true_y_diff_w`, etc.) identical.
+    (* ramstyle = "M10K" *) reg [15:0] tile_bound1_rom [0:1023];
+    (* ramstyle = "M10K" *) reg [15:0] tile_bound2_rom [0:1023];
+    (* ramstyle = "M10K" *) reg [15:0] tile_bound3_rom [0:1023];
+    (* ramstyle = "M10K" *) reg [15:0] tile_bound4_rom [0:1023];
     initial $readmemh("rtl/tile_bound1.hex", tile_bound1_rom);
     initial $readmemh("rtl/tile_bound2.hex", tile_bound2_rom);
     initial $readmemh("rtl/tile_bound3.hex", tile_bound3_rom);
@@ -571,10 +588,10 @@ module k007420 (
     reg [12:0] tile_bound1, tile_bound2, tile_bound3, tile_bound4;
     always @(posedge clk) begin
         if (state == 19) begin
-            tile_bound1 <= tile_bound1_rom[{spr_flags[1:0], oam_dout}];
-            tile_bound2 <= tile_bound2_rom[{spr_flags[1:0], oam_dout}];
-            tile_bound3 <= tile_bound3_rom[{spr_flags[1:0], oam_dout}];
-            tile_bound4 <= tile_bound4_rom[{spr_flags[1:0], oam_dout}];
+            tile_bound1 <= tile_bound1_rom[{spr_flags[1:0], oam_dout}][12:0];
+            tile_bound2 <= tile_bound2_rom[{spr_flags[1:0], oam_dout}][12:0];
+            tile_bound3 <= tile_bound3_rom[{spr_flags[1:0], oam_dout}][12:0];
+            tile_bound4 <= tile_bound4_rom[{spr_flags[1:0], oam_dout}][12:0];
         end
     end
 
@@ -854,40 +871,198 @@ module k007420 (
     
     reg last_h_cnt_0;
     reg [6:0] sprite_idx; // 63 down to 0
-    // 64KB Main Sprite ROM BRAM Cache (0x00000 - 0x0FFFF relative / 0x20000 - 0x2FFFF SDRAM IOCTL).
-    // FULL 256KB STATIC SPRITE ROM (2026-08-14, Test 222 -- supersedes the
-    // 64KB-cache-plus-6-slots-plus-SDRAM-overflow design below this comment
-    // in the project's history). Freed up by the companion background-tile
-    // migration to a small SDRAM-backed cache (project_history/debugging_log.md,
-    // section 19+): background no longer needs the full 256KB tile_rom, and
-    // that ~192KB swaps directly to sprites, which now hold their entire ROM
-    // statically -- eliminating SDRAM Port 3 sprite traffic (and the
-    // per-sprite BRAM-slot patchwork it required) entirely, not just for the
-    // specific addresses Tests 78-201 had individually confirmed and
-    // reallocated. This also sidesteps Test 202's separate, earlier finding
-    // that sprite SDRAM access is unreliable even in complete isolation (not
-    // just under Port2+Port3 contention) -- rather than trying to make that
-    // access pattern trustworthy, this avoids it altogether.
-    (* ramstyle = "M10K" *) reg [7:0] sprite_rom_bram [0:262143];
-    reg [17:0] sprite_bram_addr;
-    reg [7:0]  sprite_bram_dout;
+    // ==============================================================================
+    // SPRITE ROM CACHE (Round 196, 2026-09-03)
+    // ==============================================================================
+    // Replaces the full 256KB static sprite_rom_bram mirror (Test 222,
+    // 2026-08-14) with a bounded, tagged 64KB cache -- 2048 entries x 32
+    // bytes, deliberately mirroring k007342.v's own already-hardware-proven
+    // tile_cache design (same entry count, same 32-byte line size, same
+    // tag/valid/safe-blank-on-miss philosophy from Task #25) -- backed by
+    // real SDRAM Port 3 fetches instead of a boot-time full copy. Frees
+    // ~192 M10K blocks (256->64) for other uses.
+    //
+    // Why this is safe to try now: the full mirror existed because Test 202
+    // found sprite SDRAM access unreliable even in isolation, and a later
+    // re-measurement (2026-08-30) found it improved to ~11% steady-state
+    // failure after the arbiter reset-bug fix -- still too unreliable to
+    // trust, so the mirror stayed. But a SEPARATE, later investigation that
+    // same day found the ~11% measurement itself came from a Verilator
+    // harness artifact specific to this module's ioctl_wr/download path
+    // (values read correctly one hierarchy level up in Battlantis.sv, never
+    // correctly one level down inside k007420's own scope, on the same
+    // signals/edge -- "no plausible real-Verilog explanation," see TASKS.md's
+    // 2026-08-30 entries) -- meaning the ~11% number was never established
+    // as a real hardware finding at all. Port 2 (background tiles) already
+    // proves the same random-jump SDRAM access pattern is 100% reliable on
+    // real hardware once arbiter contention is accounted for (Test 207) --
+    // this cache reuses that same proven Port-2-style design for Port 3.
+    // sprite_rom_bram never needs ioctl-download population at all: Port 0
+    // already writes the complete, unmodified ROM download stream (every
+    // byte, every address range) straight into SDRAM (Battlantis.sv's
+    // `.p0_req(ioctl_download ? ioctl_wr : ...)`), independent of whatever
+    // any internal cache does -- this cache is populated lazily from that
+    // same SDRAM copy on demand, exactly like k007342.v's tile_cache is.
+    localparam SPRITE_CACHE_ENTRIES = 2048;
+    (* ramstyle = "M10K" *) reg [7:0] sprite_cache [0:SPRITE_CACHE_ENTRIES*32-1]; // 64KB: {index[10:0], offset[4:0]}
+    reg [1:0]  sprite_cache_tag [0:SPRITE_CACHE_ENTRIES-1];
+    reg        sprite_cache_valid [0:SPRITE_CACHE_ENTRIES-1];
 
+    reg [17:0] sprite_bram_addr; // set by the render FSM (state 12 below); name kept for minimal diff
+    reg [7:0]  sprite_bram_dout; // now the cache's tag-checked, registered output
+
+    // calc_rom_addr's 18 bits split exactly like k007342.v's vid_tile_key:
+    // {13-bit tile index, 5-bit byte-within-tile offset}. The 13-bit index
+    // splits again into an 11-bit physical cache index plus a 2-bit tag.
+    wire [12:0] sprite_cache_key      = sprite_bram_addr[17:5];
+    wire [10:0] sprite_cache_index    = sprite_cache_key[10:0];
+    wire [1:0]  sprite_cache_tag_want = sprite_cache_key[12:11];
+
+    // Miss-detection tap: latched once per genuinely-new fetch, alongside
+    // sprite_bram_addr itself in state 12's non-dedup branch below -- same
+    // dedup trigger the render FSM already computes for its own purposes
+    // (last_byte_valid && calc_rom_addr == last_byte_addr), reused here
+    // rather than building a second, independent one from scratch.
+    reg [17:0] tap_addr;
+    reg        tap_valid;
+    // Round 197 cleanup (2026-09-03): tap_addr and sprite_bram_addr are
+    // latched from the SAME calc_rom_addr value in the SAME state-12 cycle
+    // (see below) and nothing else ever writes either register in between,
+    // so they are always identical whenever tap_valid is live -- unlike
+    // k007342.v's tile_cache, whose own tap_addr genuinely lags
+    // vid_tile_addr by one fetch and so needs a real second read port. This
+    // reuses the SAME sprite_cache_index/sprite_cache_tag_want wires
+    // (already derived from sprite_bram_addr below) instead of re-deriving
+    // an always-equal pair from tap_addr. NOTE: this redundant-port removal
+    // was originally suspected to be the fix for real hardware's
+    // Error (276003)/Info (276007) M10K-inference failure, but a recompile
+    // with ONLY this change applied hit the byte-identical failure again --
+    // it wasn't the cause. Kept anyway as a legitimate simplification (one
+    // fewer read port is never wrong), but the actual fix is the read/write
+    // block restructuring further down (see its own comment).
+    wire        tap_claims_hit  = sprite_cache_valid[sprite_cache_index] && (sprite_cache_tag[sprite_cache_index] == sprite_cache_tag_want);
+
+    localparam FILL_IDLE    = 2'd0;
+    localparam FILL_REQUEST = 2'd1;
+    localparam FILL_WAIT    = 2'd2;
+
+    reg [1:0]  fill_state;
+    reg [10:0] fill_index;
+    reg [1:0]  fill_tag;
+    reg [4:0]  fill_offset;
+    reg [24:0] fill_sdram_addr_reg;
+    reg        fill_req_reg;
+    reg [17:0] last_checked_addr;
+    reg        last_checked_valid;
+
+    // Round 197 fix #2 (2026-09-03): the redundant-read-port theory above
+    // (tap_index/tap_tag_want) turned out NOT to be the actual cause --
+    // real hardware re-compiled with that fix applied and hit the byte-
+    // identical Error (276003)/Info (276007) failure again, unchanged. No
+    // structural difference from k007342.v's tile_cache block (which infers
+    // cleanly) could be found by direct comparison, so this abandons trying
+    // to match that block's exact shape and instead uses Quartus's most
+    // unambiguous canonical simple-dual-port-RAM template: the array itself
+    // is read UNCONDITIONALLY every single cycle (no gating condition
+    // anywhere near the read), landing in its own dedicated output
+    // register (sprite_cache_raw_dout) with nothing else sharing that
+    // always block. All the hit/forward/miss DECISION logic (previously
+    // interleaved with the read itself) moves to a separate, plain
+    // combinational mux stage below, driven by registers that are updated
+    // on the exact same edge (so the 1-cycle read latency lines up).
+    wire        sprite_cache_write_en   = (fill_state == FILL_WAIT) && sprite_sdram_ready;
+    wire [15:0] sprite_cache_write_addr = {fill_index, fill_offset};
+    wire [15:0] sprite_cache_read_addr  = {sprite_cache_index, sprite_bram_addr[4:0]};
+    reg  [7:0]  sprite_cache_raw_dout;
     always @(posedge clk) begin
-        if (ioctl_wr && ioctl_addr >= 25'h20000 && ioctl_addr < 25'h60000) begin
-            // BUG FIX (2026-08-14, caught by user's screen report): must subtract
-            // the 0x20000 sprite-ROM base BEFORE truncating to 18 bits, not just
-            // truncate the raw absolute ioctl_addr -- the truncation-only version
-            // wrote bytes from the ROM's second half (absolute 0x40000-0x5FFFF)
-            // to the SAME array indices as the first half (they share the same
-            // low 18 bits once 0x40000 wraps past the 18-bit window), silently
-            // overwriting real data with the wrong half's bytes, while relative
-            // reads (calc_rom_addr, correctly 0-based) for the first half never
-            // got their real data written at all -- exactly the "wrong sprite
-            // shown" symptom reported on real hardware.
-            sprite_rom_bram[ioctl_addr - 25'h20000] <= ioctl_dout;
-        end
-        sprite_bram_dout <= sprite_rom_bram[sprite_bram_addr];
+        if (sprite_cache_write_en)
+            sprite_cache[sprite_cache_write_addr] <= sprite_sdram_dout;
+        sprite_cache_raw_dout <= sprite_cache[sprite_cache_read_addr];
     end
+
+    // Registered qualifiers for the mux below -- each updates on the same
+    // edge sprite_cache_raw_dout does, so all three stay in lockstep one
+    // cycle after sprite_cache_read_addr was set (same latency the old
+    // combined block had).
+    reg        sprite_forward_hit_d1;
+    reg [7:0]  sprite_forward_data_d1;
+    reg        sprite_cache_hit_d1;
+    always @(posedge clk) begin
+        sprite_forward_hit_d1  <= sprite_cache_write_en && (sprite_cache_write_addr == sprite_cache_read_addr) &&
+                                   (fill_tag == sprite_cache_tag_want);
+        sprite_forward_data_d1 <= sprite_sdram_dout;
+        sprite_cache_hit_d1    <= sprite_cache_valid[sprite_cache_index] && (sprite_cache_tag[sprite_cache_index] == sprite_cache_tag_want);
+    end
+
+    always @* begin
+        if (sprite_forward_hit_d1)
+            sprite_bram_dout = sprite_forward_data_d1;
+        else if (sprite_cache_hit_d1)
+            sprite_bram_dout = sprite_cache_raw_dout;
+        else
+            sprite_bram_dout = 8'h00; // safe blank on miss (Task #25 philosophy) -- self-corrects once the async fill below lands
+    end
+
+    integer sci;
+    always @(posedge clk) begin
+        if (reset) begin
+            fill_state <= FILL_IDLE;
+            fill_req_reg <= 1'b0;
+            last_checked_valid <= 1'b0;
+            for (sci = 0; sci < SPRITE_CACHE_ENTRIES; sci = sci + 1) sprite_cache_valid[sci] = 1'b0;
+        end else begin
+            // New-tile detection (same dedup pattern as k007342.v's tap logic):
+            // only process each genuinely-new fetch once, not every cycle.
+            if (tap_valid && (!last_checked_valid || tap_addr != last_checked_addr)) begin
+                last_checked_addr  <= tap_addr;
+                last_checked_valid <= 1'b1;
+                if (!tap_claims_hit && fill_state == FILL_IDLE) begin
+                    fill_index  <= sprite_cache_index;
+                    fill_tag    <= sprite_cache_tag_want;
+                    fill_offset <= 5'd0;
+                    fill_state  <= FILL_REQUEST;
+                    // Invalidate the slot the moment eviction starts (same
+                    // reasoning as k007342.v): guarantees no reader ever
+                    // observes a partially-filled slot.
+                    sprite_cache_valid[sprite_cache_index] <= 1'b0;
+                end
+                // If fill_state is busy filling a different tile, this miss
+                // just isn't serviced yet -- every sprite is re-fetched up
+                // to 8-32x/frame (once per scanline it spans), so it will
+                // retry automatically; no queue needed.
+            end
+
+            case (fill_state)
+                FILL_IDLE: ; // waiting for the trigger above
+                FILL_REQUEST: begin
+                    fill_sdram_addr_reg <= 25'h20000 + {7'd0, fill_tag, fill_index, fill_offset};
+                    fill_req_reg <= 1'b1;
+                    fill_state <= FILL_WAIT;
+                end
+                FILL_WAIT: begin
+                    if (sprite_sdram_ready) begin
+                        fill_req_reg <= 1'b0;
+                        // sprite_cache write itself happens in the dedicated
+                        // block above; this only tracks state/offset
+                        // progression and the tag/valid update once all 32
+                        // bytes have landed.
+                        if (fill_offset == 5'd31) begin
+                            sprite_cache_tag[fill_index]   <= fill_tag;
+                            sprite_cache_valid[fill_index] <= 1'b1;
+                            fill_state <= FILL_IDLE;
+                        end else begin
+                            fill_offset <= fill_offset + 5'd1;
+                            fill_state <= FILL_REQUEST;
+                        end
+                    end
+                end
+                default: fill_state <= FILL_IDLE;
+            endcase
+        end
+    end
+
+    assign sprite_sdram_req  = fill_req_reg;
+    assign sprite_sdram_addr = fill_sdram_addr_reg;
 
     // Latch 25'h20003 byte on the write-path instead of reading it with an extra
     // BRAM port (which broke simple dual-port inference and forced Quartus to
@@ -918,7 +1093,6 @@ module k007420 (
         
         if (reset) begin
             state <= 16;
-            sprite_sdram_req <= 1'b0;
             sdram_ready_latched <= 1'b0;
             sprite_idx <= 7'd63;
             diag_req_count <= 0;
@@ -929,7 +1103,6 @@ module k007420 (
         end else if (h_cnt == 0 && !last_h_cnt_0) begin
             state <= 0;
             sprite_idx <= 7'd63;
-            sprite_sdram_req <= 1'b0;
         end else begin
             case (state)
                 0: begin // Wait for line buffer clear
@@ -1019,10 +1192,13 @@ module k007420 (
                 end
                 
                 12: begin
-                    // Simplified (2026-08-14, Test 222): the entire 256KB sprite ROM is
-                    // now BRAM-resident (see the array declaration above), so this is
-                    // always a same-cycle-address-set, next-cycle-data-ready BRAM read --
-                    // no more per-address slot routing or SDRAM fallback needed.
+                    // Round 196 (2026-09-03): sprite_bram_addr now indexes the
+                    // tagged SPRITE ROM CACHE (see its own section above), not
+                    // a full static mirror -- still a same-cycle-address-set,
+                    // next-cycle-data-ready read on a HIT; a MISS returns a
+                    // safe blank (0x00) for this cycle while the cache's own
+                    // fill state machine races to load the real data for next
+                    // time (same Task #25 philosophy k007342.v already uses).
                     if (last_byte_valid && calc_rom_addr == last_byte_addr) begin
                         // Same ROM byte as already latched (zoom held us on the same source
                         // pixel pair, or we're revisiting the same nibble) — no fetch needed.
@@ -1031,6 +1207,11 @@ module k007420 (
                         sprite_bram_addr <= calc_rom_addr;
                         last_byte_addr <= calc_rom_addr;
                         last_byte_valid <= 1'b1;
+                        // Miss-detection tap, latched alongside sprite_bram_addr:
+                        // reuses this exact same "genuinely new fetch" trigger
+                        // instead of building a second independent dedup check.
+                        tap_addr <= calc_rom_addr;
+                        tap_valid <= 1'b1;
                         state <= 13;
                     end
                 end
@@ -1058,7 +1239,6 @@ module k007420 (
                 end
                 
                 14: begin
-                    sprite_sdram_req <= 1'b0;
                     sdram_timeout <= sdram_timeout + 1'd1;
                     
                     if (sprite_sdram_ready) begin

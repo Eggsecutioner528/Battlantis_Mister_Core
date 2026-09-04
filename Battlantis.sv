@@ -105,7 +105,11 @@ localparam CONF_STR = {
     // unverified CONF_STR skip syntax. Test moves to the now-unnamed
     // bit 7 -- redundant with the OSD's own "Mode: Game/Test" option
     // anyway, so not needing a "Define joystick" prompt is fine.
-    "J1,Fire,Coin,Start;",
+    // 2026-09-02: added "Pause" at bit8 -- a real, remappable button that
+    // toggles the existing pause_cpu debug freeze (previously OSD-menu-only
+    // via status[30]) so pausing right at boot (e.g. to inspect the
+    // self-test screen, task #83) doesn't require navigating the OSD.
+    "J1,Shoot (Fire),English (Aim),Coin,Start,Pause;",
     "V,v",`BUILD_DATE 
 };
 
@@ -262,13 +266,13 @@ sdram sdram_inst (
     // has no reset gate at all and is proven working. The register's
     // power-on value is irrelevant since this capture unconditionally
     // fires during the very same download that also populates
-    // banked_rom, before layer1_enable is ever consumed.
-    reg layer1_enable;
-    always @(posedge clk_sys) begin
-        if (ioctl_download && ioctl_wr && ioctl_addr == 25'h0) begin
-            layer1_enable <= (ioctl_dout != 8'h03);
-        end
-    end
+    // 2026-09-02: MAME battlnts.cpp screen_update confirms that BOTH Battlantis
+    // and Rack 'Em Up / The Hustler (GX765/GX777) use ONLY Tilemap 0 (Layer 0)
+    // with Category 0 (below sprites) and Category 1 (priority attr[7] above sprites).
+    // Layer 1 is not used by either game. Enabling Layer 1 caused unwritten VRAM
+    // in the Layer 1 address range (0x1000-0x1FFF) to fetch tile 0x00 (the donut glyph)
+    // and composite it across the entire screen.
+    wire layer1_enable = 1'b0;
 
     // Running XOR checksum of every byte written to the sprite ROM range
     // (0x20000-0x5FFFF) during the real download -- a single 8-bit
@@ -289,6 +293,35 @@ sdram sdram_inst (
             end
         end
     end
+
+`ifdef SIM_SPRITE_SDRAM_PROBE
+    // TEMP (2026-08-30): trace Battlantis.sv's own top-level view of
+    // ioctl_wr/ioctl_addr/ioctl_download/ioctl_dout for the one address the
+    // sprite-SDRAM-vs-BRAM comparison found permanently missing from
+    // sprite_rom_bram (absolute 0x20060) -- isolates whether the pulse is
+    // already missing at this module's own boundary (upstream of k007420)
+    // or only lost specifically inside k007420's own write-enable logic.
+    always @(posedge clk_sys) begin
+        if (ioctl_wr && ioctl_addr == 25'h20060) begin
+            $display("[TOP-WRITE-TRACE] ioctl_wr addr=0x20060 data=0x%02x ioctl_download=%b t=%0t",
+                      ioctl_dout, ioctl_download, $time);
+        end
+    end
+
+    // TEMP (2026-08-30): total-pulse counter for the NAMED wire feeding
+    // k007420 specifically, to cross-check against k007420.v's own
+    // local_total_wr_count (which reads zero) -- if THIS side already
+    // shows zero, the break is upstream of k007420 despite the top-level
+    // ioctl_wr/ioctl_download trace above firing correctly; if this reads
+    // the full 655360, the break is specifically at/inside the k007420
+    // instance boundary.
+    reg [31:0] sprite_gen_ioctl_wr_total_count = 32'd0;
+    always @(posedge clk_sys) begin
+        if (sprite_gen_ioctl_wr) begin
+            sprite_gen_ioctl_wr_total_count <= sprite_gen_ioctl_wr_total_count + 32'd1;
+        end
+    end
+`endif
 
     reg [7:0] fixed_rom_dout;
     reg [7:0] banked_rom_dout;
@@ -369,6 +402,18 @@ sdram sdram_inst (
     // changed each time) -- read the k007342.v comment for what's actually
     // happening now, not the identifier names.
     wire tile_sdram_req;
+`ifdef SIM_ISOLATE_PORT3_FROM_PORT2
+    // 2026-08-30 (memory-budget investigation): Verilator-only isolation
+    // switch (never defined for a real hardware build) -- forces Port 2
+    // (background tile fetches) silent so the sprite_sdram_req probe
+    // (SIM_SPRITE_SDRAM_PROBE, k007420.v) can be measured with zero Port
+    // 2 contention, mirroring Test 207's own method (debugging_log.md)
+    // that proved Port 2 alone is 100% reliable once isolated from Port
+    // 3 -- testing here whether the mirror-image is also true for sprites.
+    wire p2_mux_req = 1'b0;
+`else
+    wire p2_mux_req = tile_sdram_req;
+`endif
     wire [24:0] tile_sdram_addr;
     wire [7:0] tile_sdram_dout;
     wire tile_sdram_ready;
@@ -642,7 +687,7 @@ sdram_arbiter arbiter (
     .p1_ready(cpu_sdram_ready),
 
     // Port 2: Tilemap (Unused - Available)
-    .p2_req(tile_sdram_req),
+    .p2_req(p2_mux_req),
     .p2_addr(tile_sdram_addr),
     .p2_dout(tile_sdram_dout),
     .p2_ready(tile_sdram_ready),
@@ -717,7 +762,14 @@ wire cpu_e = (cpu_clk_div == 2'b10 || cpu_clk_div == 2'b11); // High for phase 2
 // normally so the picture stays live and stable -- they just keep
 // re-scanning the same frozen OAM/VRAM contents every frame, which is
 // exactly what's wanted for a paused view.
-wire pause_cpu = status[30];
+// 2026-09-02: combined with a real Pause button (m_pause_edge, see its
+// declaration near m_coin1/m_start1 below) via the same XOR-composition
+// idiom this file already uses for effective_flip (flip_monitor ^
+// flip_screen_req) -- the OSD toggle and the physical button both flip
+// the same effective pause state independently, composing correctly.
+reg pause_button_toggle;
+always @(posedge clk_sys) if (m_pause_edge) pause_button_toggle <= ~pause_button_toggle;
+wire pause_cpu = status[30] ^ pause_button_toggle;
 
 wire k007342_irq; // Interrupt from K007342, driven on vblank when interrupts enabled
 wire cpu_bs, cpu_ba; // Bus Status / Bus Available -- see k007342_irq_ack below
@@ -925,6 +977,7 @@ end
 
 wire [7:0] k007342_dout;
 wire [7:0] k007342_pixel;
+wire k007342_priority;
 wire k007342_we = cpu_rw == 1'b0 && (cpu_addr <= 16'h1FFF || (cpu_addr >= 16'h2600 && cpu_addr <= 16'h2607));
 wire k007342_re = cpu_rw == 1'b1 && (cpu_addr <= 16'h1FFF || (cpu_addr >= 16'h2600 && cpu_addr <= 16'h2607));
 wire k007342_scroll_we = cpu_rw == 1'b0 && (cpu_addr >= 16'h2200 && cpu_addr <= 16'h23FF);
@@ -1004,6 +1057,7 @@ k007342 k007342_inst (
     .irq(k007342_irq),
     .irq_ack(k007342_irq_ack),
     .pixel_color(k007342_pixel),
+    .pixel_priority(k007342_priority),
 
     .shadow_sdram_req(tile_sdram_req),
     .shadow_sdram_addr(tile_sdram_addr),
@@ -1070,6 +1124,14 @@ wire [7:0] sprite_small_sdram_attr;
 wire [7:0] sprite_small_sdram_flags;
 wire sprite_small_sdram_nonzero;
 
+// TEMP (2026-08-30): named wire instead of an inline AND expression, to
+// test a possible Verilator CSE/scheduling quirk -- k007342_inst (same
+// clk_sys, same `.ioctl_wr(ioctl_download & ioctl_wr)` inline expression,
+// ~100 lines earlier) correctly sees every download write, but k007420's
+// own scope never sees this condition become true, confirmed multiple
+// independent ways (see TASKS.md's 2026-08-30 memory-budget entries).
+wire sprite_gen_ioctl_wr = ioctl_download & ioctl_wr;
+
 k007420 sprite_gen (
     .clk(clk_sys),
     .reset(reset),
@@ -1086,10 +1148,10 @@ k007420 sprite_gen (
     .h_cnt(h_cnt[8:0]),
     .v_cnt(v_cnt[8:0]),
     
-    .ioctl_wr(ioctl_download & ioctl_wr),
+    .ioctl_wr(sprite_gen_ioctl_wr),
     .ioctl_addr(ioctl_addr),
     .ioctl_dout(ioctl_dout),
-    
+
     .sprite_color(k007420_pixel),
     .sprite_active(k007420_active),
     
@@ -1150,14 +1212,45 @@ wire [7:0] sprite_pixel = k007420_pixel;
 // The K007420 line buffer holds sprite pixels, and k007342 holds background.
 // Both output an 8-bit palette index.
 // ==============================================================================
-wire bg_priority    = bg_pixel[7];
-wire sprite_visible = k007420_active && sprite_pixel[3:0] != 4'd0;
+// Round 192 (2026-09-03) fix: was `bg_pixel[7]`, reading priority back out
+// of the same byte used for the palette lookup. Now that k007342 carries
+// priority on its own dedicated `pixel_priority` output (bit 7 of
+// bg_pixel/pixel_color is hardcoded 0), read it from there directly.
+wire bg_priority    = k007342_priority;
+// Round 192 (2026-09-03) re-check of Round 191's sprite kill-switch test:
+// this round's own top-level pixel_color tap caught pixel_color diverging
+// from k007342's own computed background value at the GAME OVER box's
+// affected screen position, which can only happen via sprite_pixel -- so
+// a sprite may genuinely be present there despite Round 191's kill-switch
+// test showing no change in the final rendered color. Re-testing with the
+// same kill-switch pattern, now instrumented with the new pixel_color tap,
+// to see directly whether sprite_visible is true at that exact position
+// and, if forced off, whether pixel_color pins to k007342's own value.
+// Simulation-only, gated on the VERILATOR builtin ifdef predefine below;
+// zero effect on any real hardware/Quartus build.
+`ifdef VERILATOR
+reg dbg_force_sprite_off /* verilator public_flat_rw */;
+`else
+wire dbg_force_sprite_off = 1'b0;
+`endif
+wire sprite_visible = !dbg_force_sprite_off && k007420_active && sprite_pixel[3:0] != 4'd0;
 
 // Per-tile priority: k007342_mame.cpp:278 sets tileinfo.category = (color & 0x80) >> 7,
-// and battlnts_mame.cpp's screen_update() draws category-1 tiles OPAQUE in a second
-// pass AFTER sprites (map(0x2400,0x24ff)... tilemap_draw(...,0,TILEMAP_DRAW_OPAQUE,0);
-// sprites_draw(...); tilemap_draw(...,0,1|TILEMAP_DRAW_OPAQUE,0)). So a background tile
-// with attr[7]=1 must render OVER sprites, opaque regardless of its own pixel value.
+// and battlnts_mame.cpp's screen_update() draws category-1 tiles in a SECOND
+// pass with TILEMAP_DRAW_OPAQUE (battlnts_mame.cpp line 118) -- OPAQUE means
+// every pixel of that tile is blitted unconditionally, including pen index 0,
+// completely overwriting whatever the sprite pass left there. A priority tile
+// is a solid, fully-opaque rectangular cut over sprites, not transparency-
+// aware. Round 193 (2026-09-03) briefly changed this to let sprites show
+// through a priority tile's own transparent (pix==0) pixels, ported from
+// Gemini's fix in the sibling RackEmUp_template repo (commit 8d17fe4) -- but
+// the project's own real-hardware Stage 11 capture (project_history/TASKS.md,
+// same day) directly contradicts that: the clean reference frame shows the
+// Red Dragon "cleanly, simply occluded wherever the opaque box sits -- a
+// plain rectangular cut", not partially showing through. Reverted back to
+// the original unconditional block; the real fix for the dragon/GAME OVER
+// corruption is k007342.v's disp0_attr/disp1_attr priority-timing latch
+// (still in place), which was mistakenly bundled with this incorrect change.
 wire show_sprite = sprite_visible && !bg_priority;
 
 // pixel_color: which palette index to look up.
@@ -1169,12 +1262,27 @@ wire [7:0] pixel_color = show_sprite ? sprite_pixel : bg_pixel;
 // Odd byte  (addr[0]=1): { G[2:0], R[4:0] }   = bits [7:0] of 16-bit word
 reg [7:0] pal_byte_even, pal_byte_odd;
 
+// 2026-09-02, task #77: explicit 10-bit combinational address wire
+// instead of an inline concatenation as the array index -- the
+// concatenation form still triggered Quartus's "index expression is not
+// wide enough" warning (10027) despite being exactly 10 bits wide
+// (1 + 8 + 1), since Quartus's linter evaluates a literal-bit-mixed
+// concatenation's width less precisely than a plain sized wire. Kept as
+// a wire (not a register) so the read below still happens on the same
+// clock edge as the original inline form -- same value, same timing,
+// same real K007342 palette layout (256 colors x 2 bytes = 512 of the
+// 1024 declared entries reachable from the display path, matching real
+// silicon).
+wire [9:0] pal_addr_even = {1'b0, pixel_color, 1'b0};
+wire [9:0] pal_addr_odd  = {1'b0, pixel_color, 1'b1};
+
 always @(posedge clk_sys) begin
     if (ce_pix) begin
-        pal_byte_even     <= palette_ram[{pixel_color, 1'b0}];
-        pal_byte_odd      <= palette_ram[{pixel_color, 1'b1}];
+        pal_byte_even     <= palette_ram[pal_addr_even];
+        pal_byte_odd      <= palette_ram[pal_addr_odd];
     end
 end
+
 
 wire [4:0] pal_r = pal_byte_odd[4:0];                       // Red: bits [4:0] of 16-bit word (odd byte)
 wire [4:0] pal_g = {pal_byte_even[1:0], pal_byte_odd[7:5]}; // Green: bits [9:5] of 16-bit word
@@ -1388,10 +1496,19 @@ wire [7:0] dip_switch_2 = (status[16:0] == 17'd0) ? 8'h5A : { demo_opt, diff_opt
 // moves to the now-unnamed bit 7, unreachable via "Define joystick" but
 // still settable via MiSTer's more advanced/manual key binding if ever
 // needed.
-wire m_coin1  = joystick_0[5] | joystick_1[5]; // Usually Select/Coin
-wire m_start1 = joystick_0[6];
-wire m_start2 = joystick_1[6];
-wire m_test   = joystick_0[7];
+wire p1_btn1  = ~joystick_0[4]; // Fire (Battlantis) / Shoot (Rack 'Em Up)
+wire p1_btn2  = ~joystick_0[5]; // Aim / English (Rack 'Em Up)
+wire p2_btn1  = ~joystick_1[4];
+wire p2_btn2  = ~joystick_1[5];
+
+wire m_coin1  = joystick_0[6] | joystick_1[6]; // Select/Coin (bit 6)
+wire m_start1 = joystick_0[7];                 // Start 1 (bit 7)
+wire m_start2 = joystick_1[7];                 // Start 2 (bit 7)
+wire m_pause  = joystick_0[8] | joystick_1[8]; // Pause (bit 8)
+wire m_test   = joystick_0[9];                 // Test/Service (bit 9)
+reg  m_pause_prev;
+always @(posedge clk_sys) m_pause_prev <= m_pause;
+wire m_pause_edge = m_pause && !m_pause_prev;
 // Flip Screen OSD option removed (2026-08-27): its underlying K007342
 // reg 0x00 bit4 dynamic flip behavior was never implemented (Task #17,
 // deprioritized) and user hardware testing confirmed toggling it had no
@@ -1407,7 +1524,8 @@ wire [7:0] dip_switch_3 = (status[16:0] == 17'd0) ? {1'b1, 2'b11, ~m_start2, ~m_
 // Bit 7 (MAME PORT_DIPNAME 0x80 on the P1 port, not DSW3) is the
 // Allow_Continue DIP -- was previously hardcoded to 1'b1 (always "3
 // Times"), leaving the "Continues" OSD option wired to nothing.
-wire [7:0] player_1_inputs = {cont_opt, 2'b11, ~joystick_0[4], ~joystick_0[3], ~joystick_0[2], ~joystick_0[0], ~joystick_0[1]};
+// Bit 5 is Button 2 (Aim / English in Rack 'Em Up, unused in Battlantis).
+wire [7:0] player_1_inputs = {cont_opt, 1'b1, p1_btn2, p1_btn1, ~joystick_0[3], ~joystick_0[2], ~joystick_0[0], ~joystick_0[1]};
 // 2026-08-29, player feedback: was hardcoded to 8'hFF ("Unused for now"),
 // meaning Player 2 had no functional input at all even with "Upright
 // Controls: Dual" selected and a second controller plugged into
@@ -1419,7 +1537,7 @@ wire [7:0] player_1_inputs = {cont_opt, 2'b11, ~joystick_0[4], ~joystick_0[3], ~
 // Allow_Continue bit does -- just a plain unused/inactive bit), so this
 // mirrors player_1_inputs' proven-correct bit layout exactly, substituting
 // joystick_1 for joystick_0 and a hardcoded inactive 1 for the unused bit 7.
-wire [7:0] player_2_inputs = {1'b1, 2'b11, ~joystick_1[4], ~joystick_1[3], ~joystick_1[2], ~joystick_1[0], ~joystick_1[1]};
+wire [7:0] player_2_inputs = {1'b1,     1'b1, p2_btn2, p2_btn1, ~joystick_1[3], ~joystick_1[2], ~joystick_1[0], ~joystick_1[1]};
 
 // 4KB Work RAM (0x3000 - 0x3FFF)
 (* ramstyle = "M10K" *) reg [7:0] work_ram [0:4095];
@@ -1459,6 +1577,24 @@ end
 // once (matches the existing "ever" convention, e.g.
 // reset_pulse_too_short_ever above); RED = never observed in the capture
 // window, which would refute this specific mechanism.
+//
+// 2026-09-02, task #77 warning cleanup: `vblank_coalesced_ever` is never
+// read by anything in the real, synthesizable design -- Quartus correctly
+// flags it as dead code from ITS perspective. But it's still a genuinely
+// live, actively-used signal from the *simulation* side: sim_main.cpp's
+// own Task #15 vblank-service-rate diagnostic (the "[TASK15]
+// missed_vblank_count" tracking this whole session's Verilator work has
+// relied on) reads it through tb_top.sv's `dbg_vblank_coalesced_ever`/
+// `dbg_vblank_rising` debug taps, which don't exist in a real hardware
+// build at all. Deleting this block outright (tried first, then reverted
+// after the very next Verilator rebuild failed with "Can't find
+// definition of 'vblank_coalesced_ever'") would have silently broken that
+// diagnostic. Guarding it behind `SIM_SPRITE_SDRAM_PROBE` -- already
+// defined for every Verilator build via filelist.f, never defined for
+// real hardware -- keeps the diagnostic fully working in simulation while
+// genuinely fixing the warning on real hardware, where this code no
+// longer exists as it did before at all.
+`ifdef SIM_SPRITE_SDRAM_PROBE
 reg vblank_prev = 1'b0;
 reg k007342_irq_prev = 1'b0;
 always @(posedge clk_sys) begin
@@ -1472,6 +1608,7 @@ always @(posedge clk_sys) begin
     if (reset) vblank_coalesced_ever <= 1'b0;
     else if (vblank_rising && k007342_irq_prev) vblank_coalesced_ever <= 1'b1;
 end
+`endif
 
 // Z80 Clock Enable Generator (2026-08-16 fix: was 48MHz/13 = ~3.69MHz,
 // labeled "3.58MHz" chasing the NTSC-colorburst red herring MAME's own

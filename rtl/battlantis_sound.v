@@ -1666,12 +1666,20 @@ module battlantis_sound (
 	// event can be identified without assuming it's always channel 0 (or
 	// always channel 4 -- round 112's result was itself just one instance).
 	reg [3:0] ym1_last_keyon_ch;
+	wire [7:0] ym1_keyon_ch_delta = last_ym1_addr - 8'hB0;
 	always @(posedge clk or posedge rst) begin
 		if (rst)
 			ym1_last_keyon_ch <= 4'hF; // sentinel: no Key-On seen yet
 		else if (ym1_cs && !n_wr && z80_addr[0] &&
 		         last_ym1_addr >= 8'hB0 && last_ym1_addr <= 8'hB8 && z80_dout[5])
-			ym1_last_keyon_ch <= last_ym1_addr - 8'hB0;
+			// 2026-09-02, task #77: explicit 4-bit slice (via an 8-bit
+			// intermediate wire, since a part-select of a parenthesized
+			// expression is SystemVerilog-only and Verilator's plain
+			// Verilog-2001 parser rejects it) instead of an 8-bit
+			// subtraction result assigned into a 4-bit reg -- silences
+			// Quartus's truncation warning (10230). Same value: the guard
+			// above already bounds the result to 0-8.
+			ym1_last_keyon_ch <= ym1_keyon_ch_delta[3:0];
 	end
 
 	// Snapshots the last-active channel's index and its own carrier SL/RR
@@ -2723,7 +2731,11 @@ module battlantis_sound (
 	// round-half-up (add 1 before the arithmetic shift), a standard,
 	// low-risk fix for exactly this class of truncation artifact.
 	wire signed [16:0] mixed_audio_rounded = mixed_audio_raw + 17'sd1;
-	wire signed [15:0] mixed_audio = mixed_audio_rounded >>> 1;
+	// 2026-09-02, task #77: explicit [16:1] slice instead of an arithmetic
+	// shift assigned into a narrower target -- bit-for-bit identical
+	// result (dropping bit 0 and keeping the sign-extended top), but
+	// silences Quartus's truncation warning (10230).
+	wire signed [15:0] mixed_audio = mixed_audio_rounded[16:1];
 
 	assign audio_l = mixed_audio;
 	assign audio_r = mixed_audio;

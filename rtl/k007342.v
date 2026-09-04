@@ -35,8 +35,12 @@ module k007342 (
     input  wire [7:0]  ioctl_dout,
     
     // Output Pixels
-    output reg  [7:0]  pixel_color, // color index 0-15
-    
+    output reg  [7:0]  pixel_color, // color index 0-15 (bit7 always 0 -- see pixel_priority)
+    output reg         pixel_priority, // layer0_priority (attr[7]) for the sprite/bg compositing
+                                        // mux ONLY -- kept separate from pixel_color so it can
+                                        // never affect the palette RAM address (see the fix note
+                                        // at this reg's assignment below)
+
     // Interrupts
     output reg         vblank,
     output reg         int_enabled,
@@ -167,6 +171,21 @@ module k007342 (
     //   Reads return VRAM[0]–[7] because the address decoder is incomplete
     //   (real hardware behaviour confirmed in MAME).
     // ==============================================================================
+`ifdef SIM_SPRITE_SDRAM_PROBE
+    // TEMP (2026-08-30): cross-check for the k007420.v investigation --
+    // does THIS module's own ioctl_wr port also see zero pulses across the
+    // whole download? k007342 doesn't use ioctl_wr for anything (SDRAM/
+    // Port 0 does the tile ROM download directly, see the big comment
+    // above), so this is purely diagnostic and has no effect on real
+    // behavior either way.
+    reg [31:0] local_k342_total_wr_count = 32'd0;
+    always @(posedge clk) begin
+        if (ioctl_wr) begin
+            local_k342_total_wr_count <= local_k342_total_wr_count + 32'd1;
+        end
+    end
+`endif
+
     (* ramstyle = "M10K" *) reg [7:0] vram [0:16383];
     // 2026-08-29, task #83: on real Cyclone V silicon, M10K block RAM has no
     // guaranteed all-zero (or any particular) power-up content -- unlike
@@ -319,22 +338,21 @@ module k007342 (
     // port comment above. Deliberately separate from every real render-path
     // register so this can never feed back into actual rendering.
     reg [17:0] tap_addr;
-    reg [7:0]  tap_data;
     reg        tap_valid;
-    // 2026-08-29, cache-partition (see vid_tile_index's own comment above
-    // for the full design): tap_addr is a one-cycle-delayed snapshot of
-    // vid_tile_addr, captured at a specific fetch_state (8 for Layer 0,
-    // 26 for Layer 1) -- by the time it's read back out here, fetch_state
-    // has already moved on, so which layer it came from can't be
-    // re-derived from the CURRENT fetch_state the way the live read path
-    // does. Captured alongside tap_addr at both capture points instead.
+    // 2026-09-02, task #77 warning cleanup: removed `tap_data` -- predates
+    // this session's own investigations and was never read by anything.
+    //
+    // `tap_layer` (below) briefly went dead too, right after Round 168's
+    // cache-partition revert, and was removed in that same cleanup pass --
+    // then reintroduced minutes later (still 2026-09-02) once the revert's
+    // real cost became clear: it fixed Battlantis but silently reopened
+    // Rack 'Em Up's original cross-layer aliasing bug (task #79), since
+    // both used the same index space this flag used to help partition.
+    // Now feeds `tap_tile_tag`'s own layer bit instead (see
+    // vid_tile_set's comment further down for the full current design).
     reg        tap_layer;
-    // 2026-08-29, cache-partition: which physical cache half the live read
-    // path (vid_tile_index) should use. Set inside the fetch-state case
-    // statement below (0 at state 0, layer1_enable at state 18) rather
-    // than computed combinationally here -- see vid_tile_index's comment
-    // for why a live comparison in this position broke Quartus RAM
-    // inference for the whole tile_cache array.
+    // Same story as `tap_layer` -- see vid_tile_set's comment below for
+    // the current design (now feeds `vid_tile_tag`, not the index).
     reg        cache_layer_reg;
 
     // Pipeline delays for memory reads
@@ -352,65 +370,75 @@ module k007342 (
     wire [7:0] vid_tile_dout_reg;
 
     wire [12:0] vid_tile_key   = vid_tile_addr[17:5];
-    // 2026-08-29, tasks #74/#79/#80: partition the shared tile cache by
-    // layer so Layer 0 and Layer 1 can no longer evict each other's
-    // entries (the leading theory for Rack 'Em Up's persistent garbage
-    // and, less certainly, Battlantis's own same-layer aliasing symptoms).
-    // The physical index reserves its top bit to sort entries into two
-    // disjoint 1024-entry halves, one per layer -- same total physical
-    // cache size (2048 entries), each half still a fully lossless mapping
-    // of its own 8192-key address space (1024 entries x 8-way tag, vs the
-    // original single namespace's 2048 entries x 4-way tag for BOTH
-    // layers combined), at the cost of a wider 3-bit tag absorbing the
-    // index bit the layer-select bit displaced. This guarantees zero
-    // cross-layer physical-slot collisions (the original shared scheme
-    // has no such guarantee at all, and a colliding read returns another
-    // layer's raw tile bytes for a frame -- real visible corruption, not
-    // just a slower miss), in exchange for a real per-layer capacity cut.
+    // 2026-08-29, tasks #74/#79/#80: original cache-partition attempt --
+    // reserved the index's top bit to sort entries into two disjoint
+    // 1024-entry halves, one per layer, to stop Layer 0/Layer 1 evicting
+    // each other's entries (Rack 'Em Up's persistent garbage). Worked for
+    // that, but unconditionally halved the cache for EVERY game, including
+    // Battlantis (layer1_enable=0 always, so the "Layer 1 half" is pure
+    // waste for it) -- confirmed on real hardware 2026-09-01/02 as a real
+    // regression (Stage 1 black squares, from the halved cache missing
+    // more often under sustained real play than the short, narrow
+    // Round-92/93 simulation happened to catch). Reverting the partition
+    // outright (tried first) fixed Battlantis but silently reintroduces Rack 'Em
+    // Up's original cross-layer aliasing bug, since it's the exact same
+    // index space this comment used to warn about.
     //
-    // Applied UNCONDITIONALLY (not gated on layer1_enable) -- an earlier
-    // version branched the whole index/tag formula on layer1_enable via a
-    // ternary, specifically to make this a byte-for-byte no-op for any
-    // game that doesn't use Layer 1 (Battlantis: layer1_enable=0 always).
-    // That ternary broke real Quartus compilation: it adds enough
-    // combinational logic in front of tile_cache/tile_cache_tag's read
-    // address that Quartus stopped recognizing the established "one
-    // conditional synchronous read" M10K-inference pattern (the same
-    // proven pattern documented at this file's dedicated tile_cache
-    // read/write block below) and fell back to trying to build the 64KB
-    // array from discrete registers -- Error (276003), doesn't fit the
-    // device. This project has hit this exact failure class before
-    // (debugging_log.md Test 163: extra combinational logic ahead of an
-    // otherwise-clean RAM read silently breaks inference). The
-    // unconditional form below keeps the index/tag purely a slice-and-
-    // concatenate of `vid_tile_key`/`tap_tile_key`. For Battlantis
-    // (layer1_enable=0, `cache_layer_reg` always 0), this means the cache
-    // behaves as a real 1024-entry half rather than the full 2048 -- NOT
-    // a strict mathematical no-op like the reverted ternary version was,
-    // but Verilator-measured at a matched 60M-cycle run to be no worse
-    // (926187/937500 = 98.79% here vs. 925895/937500 = 98.76% for the
-    // true pre-partition baseline at the same run length -- statistically
-    // a wash, not a regression).
+    // 2026-09-02: replaced with a design that gives both games what they
+    // need without either problem. The INDEX is unconditionally the full,
+    // un-partitioned `vid_tile_key[10:0]` -- every game gets the real,
+    // full 2048-entry cache, zero capacity cost, ever. Cross-layer safety
+    // instead comes from the TAG: its extra bit (already 3 bits wide from
+    // the partition work, previously always forced 0) now carries which
+    // layer wrote this entry (`cache_layer_reg`, the exact same clean,
+    // case-statement-registered value the old partition scheme used to
+    // feed into the INDEX -- reused here for the TAG instead). A Layer 0
+    // and a Layer 1 tile can still land on the same physical slot (they
+    // now share the full space, same as the pre-partition scheme), but
+    // the tag comparison (`tile_cache_tag[index] == tag`, elsewhere in
+    // this file) now fails whenever the stored and requested layer bits
+    // differ, correctly forcing a MISS (Task #25's safe 8'h00 fallback,
+    // then a real refill) instead of the original bug's silent
+    // WRONG-LAYER-BYTES-AS-YOUR-OWN corruption. Structurally this can
+    // only produce FEWER misses than the old partition scheme, never
+    // more (sharing one 2048-entry space beats splitting into two
+    // 1024-entry halves for any access pattern), while being exactly as
+    // safe against cross-layer corruption -- a strict improvement on both
+    // axes, not a trade-off between them.
     //
-    // `cache_layer_reg` (declared with the other fetch-pipeline registers
-    // above) is a genuine register, not a live comparison -- a first
-    // attempt used `layer1_enable && (fetch_state >= 6'd18)` directly as
-    // a combinational wire, and THAT (not the earlier ternary) turned out
-    // to be the actual Quartus RAM-inference breaker: even one bit of
-    // comparator logic sitting directly in tile_cache's read address was
-    // enough to defeat inference of the 64KB array. Fixed by moving the
-    // `>= 18` comparison into the SAME fetch-state case statement that
-    // already latches vid_tile_addr (set to 0 at state 0, to
-    // layer1_enable at state 18 -- see that case statement below), so a
-    // clean register feeds the read address instead of raw comparator
-    // output. Safe because nothing ever consumes vid_tile_dout during
-    // states 18-23 (the only window where the register's value would
-    // otherwise lag the live comparison by up to a few cycles) -- the
-    // real Layer 1 reads it must be correct for don't happen until state
-    // 26 at the earliest, well after the state-18 update lands.
+    // Still applied via the same safe, case-statement-registered pattern
+    // as before (`cache_layer_reg` set to 0 at fetch_state 0, to
+    // layer1_enable at fetch_state 18 -- see that case statement below)
+    // rather than a live ternary or comparator: this file has twice
+    // already hit real Quartus M10K-inference breaks (Error 276003, "doesn't
+    // fit the device") from combinational logic sitting directly in front
+    // of `tile_cache`'s own read address (documented in this file's own
+    // history, and in debugging_log.md's Test 163). Critically, THIS
+    // design never puts `cache_layer_reg` anywhere near that read address
+    // at all -- the index stays a pure, unconditional slice of
+    // `vid_tile_key`, exactly like the reverted no-partition version, so
+    // that specific risk doesn't apply here regardless. `cache_layer_reg`
+    // only feeds `tile_cache_tag`'s WRITE data and the post-read tag
+    // comparison, both well clear of `tile_cache`'s own address path.
+    //
+    // Round 198 (2026-09-03): went 2-way set-associative to cut the real,
+    // measured aliasing rate (Round 164: two different tiles regularly
+    // fight over the same slot under Battlantis's actual scroll-heavy
+    // access pattern) without spending more M10K than the existing 64KB
+    // (Round 195 already proved brute-force doubling the direct-mapped
+    // size doesn't fit the device). One index bit moves from the SET into
+    // the TAG instead: SET is now vid_tile_key[9:0] (1024 sets, half as
+    // many as before), TAG widens 3->4 bits ({layer, key[12:10]}) to cover
+    // the extra bit. Two tiles that used to force an immediate evict/
+    // refill cycle on each other can now both stay resident at once (one
+    // per way); only a THIRD contender for the same set still evicts.
+    // Kept the exact same "index/set stays a pure, unconditional slice,
+    // nothing else goes near it" discipline from the comment above --
+    // see the read/write block further down for how the way-select
+    // avoids ever touching either way's own read address directly.
+    wire [9:0]  vid_tile_set   = vid_tile_key[9:0];
     wire        cache_layer_bit = cache_layer_reg;
-    wire [10:0] vid_tile_index  = {cache_layer_bit, vid_tile_key[9:0]};
-    wire [2:0]  vid_tile_tag    = {vid_tile_key[12:11], vid_tile_key[10]};
+    wire [3:0]  vid_tile_tag   = {cache_layer_bit, vid_tile_key[12:10]};
 
     wire [7:0] vid_tile_dout = vid_tile_dout_reg;
 
@@ -419,9 +447,6 @@ module k007342 (
     reg [7:0] layer1_tile, layer1_attr;
     reg [7:0] layer0_data [0:3];
     reg [7:0] layer1_data [0:3];
-    
-    reg [2:0] layer0_bank;
-    reg [2:0] layer1_bank;
 
     integer regs_reset_i;
     always @(posedge clk) begin
@@ -538,7 +563,6 @@ module k007342 (
                     // machine below. Zero new address computation here -- both
                     // values already exist for the real render path.
                     tap_addr <= vid_tile_addr;
-                    tap_data <= vid_tile_dout;
                     tap_valid <= 1'b1;
                     tap_layer <= 1'b0; // Layer 0's own tap capture
                 end
@@ -593,7 +617,6 @@ module k007342 (
                     layer1_data[0] <= vid_tile_dout;
                     if (layer1_enable) begin
                         tap_addr <= vid_tile_addr;
-                        tap_data <= vid_tile_dout;
                         tap_valid <= 1'b1;
                         tap_layer <= 1'b1; // Layer 1's own tap capture
                     end
@@ -629,17 +652,29 @@ module k007342 (
     reg [7:0] disp1 [0:3];  // display buffer for Layer 1
     reg [2:0] fine_scroll_latch0;
     reg [2:0] fine_scroll_latch1;
+    // Round 193 (2026-09-03), ported from Gemini's fix in RackEmUp_template
+    // (commit 8d17fe4): disp0[]/disp1[] hold the CURRENT tile's pixel data,
+    // latched at fetch_state==63 -- but layer0_priority/layer1_priority
+    // used to always read the LIVE layer0_attr/layer1_attr register, which
+    // by the time a given pixel is displayed may already have moved on to
+    // the NEXT tile being prefetched. These latch the attribute byte
+    // alongside its own tile's pixel data so priority stays aligned with
+    // whichever tile (current vs. next) sel_byte0/1 actually selected.
+    reg [7:0] disp0_attr;
+    reg [7:0] disp1_attr;
 
     always @(posedge clk) begin
         if (fetch_state == 63) begin
-            disp0[0] <= layer0_data[0];
-            disp0[1] <= layer0_data[1];
-            disp0[2] <= layer0_data[2];
-            disp0[3] <= layer0_data[3];
-            disp1[0] <= layer1_data[0];
-            disp1[1] <= layer1_data[1];
-            disp1[2] <= layer1_data[2];
-            disp1[3] <= layer1_data[3];
+            disp0[0]   <= layer0_data[0];
+            disp0[1]   <= layer0_data[1];
+            disp0[2]   <= layer0_data[2];
+            disp0[3]   <= layer0_data[3];
+            disp0_attr <= layer0_attr;
+            disp1[0]   <= layer1_data[0];
+            disp1[1]   <= layer1_data[1];
+            disp1[2]   <= layer1_data[2];
+            disp1[3]   <= layer1_data[3];
+            disp1_attr <= layer1_attr;
         end
         if (ce_pix && h_cnt[2:0] == 3'd0) begin
             fine_scroll_latch0 <= effective_layer0_scroll_x[2:0];
@@ -669,7 +704,12 @@ module k007342 (
     // uniform garbage-glyph overlay on real hardware -- root-caused
     // afterward to the fill-trigger gap, not this mux itself; re-verify
     // carefully in Verilator before trusting this on real hardware again).
-    wire layer1_priority = layer1_attr[7];
+    // Round 193: priority now reads whichever tile's own attribute byte
+    // (current disp*_attr vs. live layer*_attr for the prefetched next
+    // tile) matches whichever tile sel_byte0/1 actually pulled the pixel
+    // from, instead of always the live register -- see disp0_attr's own
+    // comment above for why this matters.
+    wire layer1_priority = use_next1 ? layer1_attr[7] : disp1_attr[7];
     wire        layer1_wins  = layer1_enable && (layer1_pix != 4'd0);
     wire [3:0]  final_pix    = layer1_wins ? layer1_pix : layer0_pix;
     wire        final_priority = layer1_wins ? layer1_priority : layer0_priority;
@@ -679,12 +719,34 @@ module k007342 (
     wire [2:0] final_pal = 3'd0;
 
     // layer0_priority (attr[7]): when high, Layer 0 renders on TOP of sprites.
-    wire layer0_priority = layer0_attr[7];
+    // Round 193: see layer1_priority's own comment above -- reads whichever
+    // tile's attribute (current disp0_attr vs. live layer0_attr for the
+    // prefetched next tile) matches what sel_byte0 actually pulled from.
+    wire layer0_priority = use_next0 ? layer0_attr[7] : disp0_attr[7];
 
-    // Output: {priority, palette_bank[2:0], colour_index[3:0]}.
+    // Round 192 (2026-09-03) fix: `final_priority` used to be packed into
+    // pixel_color's own bit 7 ({final_priority, final_pal, final_pix}),
+    // which put every attr[7]=1 tile's palette lookup into pixel_color
+    // 0x80-0xFF -- a completely different half of palette RAM than every
+    // attr[7]=0 tile, despite `final_pal` always being 0 either way. Real
+    // hardware doesn't do this: `battlnts_mame.cpp`'s `tile_callback` sets
+    // `color = 0` unconditionally (never touches attr[7]/bit 0x80), and
+    // priority is handled entirely separately via MAME's tilemap draw-
+    // category mechanism, not by changing which palette entries a tile
+    // addresses. Since games have no reason to populate that upper half
+    // (real hardware never reads it for tile color), it reads back as
+    // whatever colorram/testpattern data happens to sit there -- black in
+    // every real-game-state capture taken this session -- so any priority
+    // tile rendered black instead of its real color. Fixed by keeping
+    // pixel_color's bit 7 hardcoded 0 and carrying priority on its own
+    // dedicated `pixel_priority` output instead, so it can only affect
+    // sprite/background compositing order (Battlantis.sv's `bg_priority`),
+    // never the palette RAM address.
+    // Output: {1'b0, palette_bank[2:0], colour_index[3:0]}.
     always @(posedge clk) begin
         if (ce_pix) begin
-            pixel_color <= {final_priority, final_pal, final_pix};
+            pixel_color <= {1'b0, final_pal, final_pix};
+            pixel_priority <= final_priority;
         end
     end
 
@@ -727,38 +789,43 @@ module k007342 (
     // single-frame black patch, not a timing risk.
     //
     // Cache key = {palette, tile index} (13 bits, address bits [17:5] with
-    // row/byte stripped). 2026-08-29, tasks #74/#79/#80: STALE COMMENT
-    // UPDATED -- this used to be a single flat 2048-entry direct-mapped
-    // namespace shared by both layers (index = key[10:0], tag = key
-    // [12:11]). Now partitioned by layer (see vid_tile_index/vid_tile_tag
-    // above for the full design): physical index = {cache_layer_bit,
-    // key[9:0]} (11 bits, still 2048 total physical entries), tag =
-    // {key[12:11], key[10]} (widened 2->3 bits to absorb the index bit
-    // the partition bit displaced). For any game with layer1_enable=0
-    // (Battlantis), cache_layer_bit is always 0 and this reduces
-    // byte-for-byte to the original single-namespace scheme.
-    localparam TILE_CACHE_ENTRIES = 2048;
-    (* ramstyle = "M10K" *) reg [7:0] tile_cache [0:TILE_CACHE_ENTRIES*32-1]; // 64KB: {index[10:0], offset[4:0]}
-    reg [2:0]  tile_cache_tag [0:TILE_CACHE_ENTRIES-1]; // widened 2->3 bits for the cache-partition scheme (see vid_tile_index's comment)
-    reg        tile_cache_valid [0:TILE_CACHE_ENTRIES-1];
+    // row/byte stripped). Round 198 (2026-09-03): 2-way set-associative,
+    // same 64KB total as the old direct-mapped design (see vid_tile_set/
+    // vid_tile_tag's own comment above for the full reasoning). Built as
+    // TWO independent 32KB arrays (one per way) rather than one 64KB array
+    // with a way-select bit folded into its address -- each way keeps the
+    // exact same "pure, unconditional slice, nothing else goes near the
+    // read address" discipline the direct-mapped design already relied on
+    // to avoid this file's own twice-documented M10K-inference break; a
+    // single 64KB array would have needed the way-select (itself derived
+    // combinationally from the tag/valid arrays) sitting right in front of
+    // its read address, exactly the anti-pattern that comment warns about.
+    localparam TILE_CACHE_SETS = 1024;
+    (* ramstyle = "M10K" *) reg [7:0] tile_cache_way0 [0:TILE_CACHE_SETS*32-1]; // 32KB: {set[9:0], offset[4:0]}
+    (* ramstyle = "M10K" *) reg [7:0] tile_cache_way1 [0:TILE_CACHE_SETS*32-1]; // 32KB: {set[9:0], offset[4:0]}
+    reg [3:0]  tile_cache_tag0 [0:TILE_CACHE_SETS-1]; // widened 3->4 bits: one fewer set bit needs one more tag bit
+    reg [3:0]  tile_cache_tag1 [0:TILE_CACHE_SETS-1];
+    reg        tile_cache_valid0 [0:TILE_CACHE_SETS-1];
+    reg        tile_cache_valid1 [0:TILE_CACHE_SETS-1];
+    // Per-set round-robin victim-way flag: which way gets evicted the NEXT
+    // time this set misses. Flipped every time a fill is dispatched for
+    // that set (see the fill-trigger logic further down), so two
+    // back-to-back misses on the same set alternate ways instead of both
+    // hammering the same one -- a simple, cheap stand-in for real LRU that
+    // still guarantees two genuinely-different tiles can coexist in one
+    // set without one immediately evicting the other.
+    reg        tile_cache_victim [0:TILE_CACHE_SETS-1];
 
     // Miss/fill-trigger detection reuses the tap_addr stream (one genuinely-
     // new value per real tile-column fetch, same dedup Stage 1 proved) --
     // independent of the real read path above, which uses vid_tile_addr
     // directly since it can't wait for tap's one-cycle-later snapshot.
     wire [12:0] tap_tile_key   = tap_addr[17:5];
-    // Same unconditional (not layer1_enable-branched -- see
-    // vid_tile_index's comment for why) cache-partition scheme as
-    // vid_tile_index/vid_tile_tag above, using the captured `tap_layer`
-    // bit (recorded at the moment tap_addr itself was captured) instead
-    // of the live fetch_state, since fetch_state has already moved on by
-    // the time this is read. `tap_layer` is only ever set to 1 at the
-    // Layer 1 capture point, itself gated on layer1_enable, so it's
-    // already guaranteed 0 for any game that doesn't use Layer 1 --
-    // consistent with `cache_layer_bit` above.
-    wire [10:0] tap_tile_index = {tap_layer, tap_tile_key[9:0]};
-    wire [2:0]  tap_tile_tag   = {tap_tile_key[12:11], tap_tile_key[10]};
-    wire        tap_tile_claims_hit = tile_cache_valid[tap_tile_index] && (tile_cache_tag[tap_tile_index] == tap_tile_tag);
+    wire [9:0]  tap_tile_set   = tap_tile_key[9:0];
+    wire [3:0]  tap_tile_tag   = {tap_layer, tap_tile_key[12:10]};
+    wire        tap_tile_hit_way0    = tile_cache_valid0[tap_tile_set] && (tile_cache_tag0[tap_tile_set] == tap_tile_tag);
+    wire        tap_tile_hit_way1    = tile_cache_valid1[tap_tile_set] && (tile_cache_tag1[tap_tile_set] == tap_tile_tag);
+    wire        tap_tile_claims_hit  = tap_tile_hit_way0 || tap_tile_hit_way1;
 
     // --- Background fill state machine (Port 2: request/wait, 32 bytes per miss) ---
     localparam FILL_IDLE    = 2'd0;
@@ -766,8 +833,9 @@ module k007342 (
     localparam FILL_WAIT    = 2'd2;
 
     reg [1:0]  fill_state;
-    reg [10:0] fill_index;
-    reg [2:0]  fill_tag; // widened 2->3 bits for the cache-partition scheme (see vid_tile_index's comment)
+    reg [9:0]  fill_set;  // Round 198: was fill_index (11 bits); now a set index (10 bits), one way chosen separately below
+    reg [3:0]  fill_tag;  // widened 3->4 bits for the 2-way set-associative scheme (see vid_tile_set's comment)
+    reg        fill_way;  // which of the 2 ways this fill is writing into
     reg [4:0]  fill_offset;
     reg [24:0] fill_sdram_addr_reg;
     reg        fill_req_reg;
@@ -811,58 +879,75 @@ module k007342 (
     reg [7:0] fill_byte_ever_seen;
     reg [7:0] fill_byte_ever_seen_stable;
 
-    // Dedicated, minimal read/write block for tile_cache ONLY (2026-08-14):
-    // proven pattern from Test 220/221's debugging -- a single block with
-    // one write (gated by a simple enable) and one unconditional registered
-    // read is what Quartus reliably infers as one clean dual-port M10K; an
-    // earlier, more tangled version (read and write buried in nested
-    // if/case branches alongside unrelated logic) got duplicated into two
-    // unsynchronized physical instances instead. Read side now serves the
-    // REAL render path (vid_tile_index/vid_tile_addr, declared earlier),
-    // not a diagnostic tap. Write-forwarding bypass kept: on Cyclone V
-    // M10K, a same-cycle read and write to the same address returns
-    // undefined data (this project's own established fact, root cause of
-    // an earlier line-buffer regression) -- real, not just theoretical,
-    // here: the render path can revisit the same tile a fill is still
-    // populating (a tile spans 8 scanlines; a slower fill can still be
-    // in flight when a later row of the SAME tile is re-read).
-    wire        tile_cache_write_en   = (fill_state == FILL_WAIT) && shadow_sdram_ready;
-    wire [15:0] tile_cache_write_addr = {fill_index, fill_offset};
-    wire [15:0] tile_cache_read_addr  = {vid_tile_index, vid_tile_addr[4:0]};
-    reg  [7:0]  tile_cache_dout;
+    // Round 198 (2026-09-03) read/write block, 2-way set-associative.
+    // Each way is its own independent array, read completely UNCONDITIONALLY
+    // every cycle at a pure {set, offset} address -- the same bulletproof
+    // template that fixed k007420.v's sprite cache's own real M10K-inference
+    // failure this same round (Error 276003/Info 276007: Quartus refusing
+    // to infer block RAM whenever the read is nested in a conditional
+    // sharing an output register with other sources). All hit/forward/miss
+    // DECISION logic -- including which way's data to actually use -- moves
+    // to a separate downstream combinational mux, so neither way's own
+    // read address is ever touched by anything but a plain slice.
+    wire        tile_cache_write_en    = (fill_state == FILL_WAIT) && shadow_sdram_ready;
+    wire [14:0] tile_cache_write_addr  = {fill_set, fill_offset};
+    wire [14:0] tile_cache_read_addr   = {vid_tile_set, vid_tile_addr[4:0]};
+    wire        tile_cache_write_way0  = tile_cache_write_en && (fill_way == 1'b0);
+    wire        tile_cache_write_way1  = tile_cache_write_en && (fill_way == 1'b1);
+    reg  [7:0]  tile_cache_raw_dout_way0;
+    reg  [7:0]  tile_cache_raw_dout_way1;
+    always @(posedge clk) begin
+        if (tile_cache_write_way0)
+            tile_cache_way0[tile_cache_write_addr] <= shadow_sdram_dout;
+        tile_cache_raw_dout_way0 <= tile_cache_way0[tile_cache_read_addr];
+    end
+    always @(posedge clk) begin
+        if (tile_cache_write_way1)
+            tile_cache_way1[tile_cache_write_addr] <= shadow_sdram_dout;
+        tile_cache_raw_dout_way1 <= tile_cache_way1[tile_cache_read_addr];
+    end
+
+    // Diagnostics (last byte written by either way, and a sticky OR across
+    // all fills ever seen) -- unaffected by which way actually took it.
     always @(posedge clk) begin
         if (reset) begin
             last_fill_byte <= 8'd0;
             fill_byte_ever_seen <= 8'd0;
         end else if (tile_cache_write_en) begin
-            tile_cache[tile_cache_write_addr] <= shadow_sdram_dout;
             last_fill_byte <= shadow_sdram_dout;
             fill_byte_ever_seen <= fill_byte_ever_seen | shadow_sdram_dout;
         end
-        // Task #25 (2026-08-27) fix: this used to unconditionally return
-        // tile_cache[tile_cache_read_addr] whenever it wasn't forwarding a
-        // same-cycle fill write, with no check that the resident data at
-        // this index actually belongs to the tile currently being
-        // requested. Directly measured (see project_history/TASKS.md
-        // Round 164) that two different tiles regularly alias to the same
-        // 11-bit index (2048 entries, 2-bit tag -- only 4 tiles can share
-        // an index without collision, and this ROM's real access pattern
-        // hits that limit often, sometimes multiple times within a single
-        // frame), and that a miss evicts the old tile immediately, well
-        // before the new one's multi-cycle SDRAM fill completes -- during
-        // that window the old code would show whichever unrelated tile's
-        // bytes happened to still be sitting in the slot. Now: only the
-        // same-cycle write-forwarding path (with the fill genuinely being
-        // for the SAME tile the display wants, not just the same index)
-        // or a resident, tag-matched entry are trusted; anything else
-        // returns a safe blank byte instead of unverified data.
-        if (tile_cache_write_en && (tile_cache_write_addr == tile_cache_read_addr) &&
-            (fill_tag == vid_tile_tag))
-            tile_cache_dout <= shadow_sdram_dout;
-        else if (tile_cache_valid[vid_tile_index] && (tile_cache_tag[vid_tile_index] == vid_tile_tag))
-            tile_cache_dout <= tile_cache[tile_cache_read_addr];
+    end
+
+    // Registered hit/forward qualifiers, one cycle behind vid_tile_set/tag
+    // just like the two raw way outputs above, so everything lines up on
+    // the same edge before the final mux. Task #25 (2026-08-27) safe-blank-
+    // on-miss philosophy preserved: only a genuine write-forward (the exact
+    // byte being filled right now is the exact byte the display wants right
+    // now) or a resident, tag-matched way are trusted; anything else -- an
+    // outright miss, OR a stale/wrong-tag resident entry -- returns 8'h00
+    // instead of unverified data (Round 164 measured real aliasing here).
+    reg        tile_forward_hit_d1;
+    reg [7:0]  tile_forward_data_d1;
+    reg        tile_hit_way0_d1, tile_hit_way1_d1;
+    always @(posedge clk) begin
+        tile_forward_hit_d1  <= tile_cache_write_en && (tile_cache_write_addr == tile_cache_read_addr) &&
+                                 (fill_tag == vid_tile_tag);
+        tile_forward_data_d1 <= shadow_sdram_dout;
+        tile_hit_way0_d1     <= tile_cache_valid0[vid_tile_set] && (tile_cache_tag0[vid_tile_set] == vid_tile_tag);
+        tile_hit_way1_d1     <= tile_cache_valid1[vid_tile_set] && (tile_cache_tag1[vid_tile_set] == vid_tile_tag);
+    end
+
+    reg [7:0] tile_cache_dout;
+    always @* begin
+        if (tile_forward_hit_d1)
+            tile_cache_dout = tile_forward_data_d1;
+        else if (tile_hit_way0_d1)
+            tile_cache_dout = tile_cache_raw_dout_way0;
+        else if (tile_hit_way1_d1)
+            tile_cache_dout = tile_cache_raw_dout_way1;
         else
-            tile_cache_dout <= 8'h00;
+            tile_cache_dout = 8'h00;
     end
     assign vid_tile_dout_reg = tile_cache_dout;
 
@@ -890,10 +975,15 @@ module k007342 (
             // Blocking assignment here (Verilator requires this for an
             // array clear inside a for loop; nonblocking arrays in loops
             // aren't supported). Behaviorally identical to the original
-            // nonblocking form: this is the only writer of tile_cache_valid
-            // in this reset branch, nothing else reads or writes it at this
-            // same edge, so there is no blocking/nonblocking ordering hazard.
-            for (ci = 0; ci < TILE_CACHE_ENTRIES; ci = ci + 1) tile_cache_valid[ci] = 1'b0;
+            // nonblocking form: these are the only writers of the valid/
+            // victim arrays in this reset branch, nothing else reads or
+            // writes them at this same edge, so there is no blocking/
+            // nonblocking ordering hazard.
+            for (ci = 0; ci < TILE_CACHE_SETS; ci = ci + 1) begin
+                tile_cache_valid0[ci] = 1'b0;
+                tile_cache_valid1[ci] = 1'b0;
+                tile_cache_victim[ci] = 1'b0;
+            end
         end else begin
             if (v_cnt == 9'd0 && !cache_last_v_cnt_0) begin
                 last_checked_addr_stable <= tile_last_checked_addr;
@@ -920,20 +1010,31 @@ module k007342 (
                     // fetched up to 8x/frame, one per scanline it spans), no
                     // queue needed.
                     if (fill_state == FILL_IDLE) begin
-                        fill_index <= tap_tile_index;
+                        fill_set   <= tap_tile_set;
                         fill_tag   <= tap_tile_tag;
+                        // Round 198: victim way is this set's own round-robin
+                        // flag -- alternates on every fill so two genuinely
+                        // different tiles contending for the same set don't
+                        // just keep evicting each other from a single way.
+                        fill_way   <= tile_cache_victim[tap_tile_set];
                         fill_offset <= 5'd0;
                         fill_state <= FILL_REQUEST;
-                        // Invalidate the slot THE MOMENT eviction starts, not
-                        // when the fill completes: otherwise a reader still
-                        // wanting the OLD tile at this same index sees the
-                        // old tag as a "hit" while the fill is mid-flight,
-                        // reading a mix of old bytes and already-overwritten
-                        // new-tile bytes. Costs the old tile its cache entry
-                        // immediately on eviction (already true in spirit --
-                        // it WAS about to be overwritten), but guarantees no
-                        // reader ever observes a partially-filled slot.
-                        tile_cache_valid[tap_tile_index] <= 1'b0;
+                        // Invalidate the victim way THE MOMENT eviction
+                        // starts, not when the fill completes: otherwise a
+                        // reader still wanting the OLD tile in that way sees
+                        // the old tag as a "hit" while the fill is
+                        // mid-flight, reading a mix of old bytes and
+                        // already-overwritten new-tile bytes. Costs the old
+                        // tile its cache entry immediately on eviction
+                        // (already true in spirit -- it WAS about to be
+                        // overwritten), but guarantees no reader ever
+                        // observes a partially-filled slot.
+                        if (tile_cache_victim[tap_tile_set] == 1'b0)
+                            tile_cache_valid0[tap_tile_set] <= 1'b0;
+                        else
+                            tile_cache_valid1[tap_tile_set] <= 1'b0;
+                        // Flip the round-robin flag for next time this set misses.
+                        tile_cache_victim[tap_tile_set] <= ~tile_cache_victim[tap_tile_set];
                     end
                 end
             end
@@ -942,18 +1043,24 @@ module k007342 (
                 FILL_IDLE: ; // waiting for the trigger above
                 FILL_REQUEST: if (!port3_busy) begin
                     // Only actually dispatch once Port 3 is genuinely idle --
-                    // see the port3_busy port comment above. With sprites now
-                    // fully static BRAM (rtl/k007420.v), Port 3 is idle during
-                    // real gameplay anyway, so this should rarely even wait.
-                    // 2026-08-29, cache-partition: fill_index[10] is always
-                    // the layer-select bit (see vid_tile_index's comment --
-                    // the partition scheme applies unconditionally now, not
-                    // branched on layer1_enable), NOT part of the real tile
-                    // ROM address -- only fill_index[9:0] combines with the
-                    // full 3-bit fill_tag to reconstruct the true 13-bit
-                    // key. Including fill_index[10] here would fetch from a
-                    // completely wrong, shifted SDRAM address.
-                    fill_sdram_addr_reg <= {7'd0, fill_tag, fill_index[9:0], fill_offset} + 25'h60000; // relative -> absolute (tile ROM base)
+                    // see the port3_busy port comment above. NOTE (Round 197):
+                    // the "sprites are fully static BRAM so Port 3 is idle
+                    // during gameplay" reasoning this comment used to give is
+                    // now STALE -- k007420.v's sprite ROM went back to a real
+                    // SDRAM-backed cache on Port 3 this same round, so Port 3
+                    // does see genuine traffic during gameplay again. This
+                    // gate (already existing, Test 221) is exactly the right
+                    // mechanism for that -- no new fix needed here, just
+                    // correcting the comment so it doesn't claim Port 3 is
+                    // idle when it no longer is.
+                    //
+                    // Round 198: fill_tag is now 4 bits ({layer, key[12:10]});
+                    // only its low 3 bits are real address bits (the top bit
+                    // is the layer, never part of the ROM address), same
+                    // "reconstruct the real key from tag+set" idea as before,
+                    // just one more real address bit now that SET lost one
+                    // to the extra tag bit.
+                    fill_sdram_addr_reg <= {7'd0, fill_tag[2:0], fill_set, fill_offset} + 25'h60000; // relative -> absolute (tile ROM base)
                     fill_req_reg <= 1'b1;
                     fill_wait_cycles <= 16'd0;
                     fill_state <= FILL_WAIT;
@@ -969,8 +1076,13 @@ module k007342 (
                             fill_max_wait_cycles <= fill_wait_cycles;
                         end
                         if (fill_offset == 5'd31) begin
-                            tile_cache_tag[fill_index]   <= fill_tag;
-                            tile_cache_valid[fill_index] <= 1'b1;
+                            if (fill_way == 1'b0) begin
+                                tile_cache_tag0[fill_set]   <= fill_tag;
+                                tile_cache_valid0[fill_set] <= 1'b1;
+                            end else begin
+                                tile_cache_tag1[fill_set]   <= fill_tag;
+                                tile_cache_valid1[fill_set] <= 1'b1;
+                            end
                             fill_state <= FILL_IDLE;
                         end else begin
                             fill_offset <= fill_offset + 5'd1;

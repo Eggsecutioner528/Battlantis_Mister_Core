@@ -189,9 +189,6 @@ localparam CC_C_BIT=  3'd0;
 // Convenience calculations
 reg     [15:0] pc_p1;
 reg     [15:0] pc_p2;
-reg     [15:0] pc_p3;
-reg     [15:0] pc_p4;
-reg     [15:0] pc_p5;
 reg     [15:0] s_p1;
 reg     [15:0] s_m1;
 reg     [15:0] u_p1;
@@ -452,9 +449,11 @@ assign MappedInstruction = D;
 //end
 //endfunction
 
-wire IsIllegalInstruction;
-assign IsIllegalInstruction = 1'b0; // No
-
+// 2026-09-02, task #77 warning cleanup: IsIllegalInstruction was hardcoded
+// to 1'b0 (illegal-opcode handling disabled/simplified) with no consumer
+// anywhere in the file -- removed. The commented-out generate block below
+// (the original GHOST/IGNORE/STOP-parameterized version) is left as
+// historical reference for how to restore it if ever needed.
 //generate
 //if (ILLEGAL_INSTRUCTIONS=="GHOST")
 //begin : never_illegal
@@ -466,9 +465,8 @@ assign IsIllegalInstruction = 1'b0; // No
 //end
 //endgenerate
 
-wire [6:0] IllegalInstructionState;
-assign IllegalInstructionState = CPUSTATE_FETCH_I1[6:0];
-
+// Same removal as IsIllegalInstruction above -- IllegalInstructionState was
+// hardcoded and never consumed.
 //generate
 //if (ILLEGAL_INSTRUCTIONS=="IGNORE")
 //begin : illegal_state
@@ -2123,9 +2121,6 @@ begin
     addr_nxt   =  16'HFFFF;
     pc_p1      =  (pc+16'H1);
     pc_p2      =  (pc+16'H2);
-    pc_p3      =  (pc+16'H3);
-    pc_p4      =  (pc+16'H4);
-    pc_p5      =  (pc+16'H5);
     s_p1       =  (s+16'H1);
     s_m1       =  (s-16'H1);
     u_p1       =  (u+16'H1);
