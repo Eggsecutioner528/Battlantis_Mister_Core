@@ -37,26 +37,70 @@ localparam CONF_STR = {
     // file for the full internal wiring (screen_rotate's no_rotate/flip/
     // rotate_ccw) behind these two menu entries.
     //
-    // Task #24 CLOSED (2026-08-27) as a documented limitation: these two
-    // options only rotate content for the DDR3-backed scaled VGA/HDMI
-    // path (via screen_rotate below). The CRT on the Analog IO board uses
-    // MiSTer's Direct Video mode, which bypasses DDR3/the scaler entirely
-    // by design (near-zero latency, cycle-locked to the game's own raster) --
-    // there is no framebuffer there to rotate. A dedicated on-chip
-    // frame-buffer for Direct Video was scoped but found infeasible on
-    // this FPGA: the design already uses 100% of the DE10-Nano's on-chip
-    // RAM blocks (`output_files/Template.fit.summary`: 553/553), with
-    // zero headroom for the ~100-200 additional blocks a 256x224
-    // double-buffered rotator would need. Direct Video therefore stays
-    // Portrait-only by design (matching a real MiSTerCade-style
-    // physically-rotated cabinet, which is what this ROT90 game's raw
-    // signal already assumes) -- Landscape/non-rotated-CRT users should
-    // use these two options here via scaled VGA/HDMI instead. See TASKS.md
-    // Task #24, Round 166 for the full investigation.
+    // These two options only rotate content for the DDR3-backed scaled
+    // VGA/HDMI path (via screen_rotate below). The CRT on the Analog IO
+    // board uses MiSTer's Direct Video mode, which bypasses DDR3/the
+    // scaler entirely by design (near-zero latency, cycle-locked to the
+    // game's own raster) -- there is no DDR3 framebuffer there to rotate.
+    //
+    // 2026-08-27, Task #24 originally CLOSED here as a documented
+    // limitation: a dedicated on-chip frame-buffer for Direct Video was
+    // scoped and found infeasible at the time (design used 100% of
+    // on-chip RAM, 553/553 blocks, with zero headroom for a 256x224
+    // double-buffered rotator). SUPERSEDED 2026-09-04/05, Task #90: that
+    // limitation no longer holds -- a real on-chip rotation buffer
+    // (rtl/direct_video_rotate.v) was implemented, fitting inside the
+    // available M10K budget at 12bpp (4 bits/channel) instead of full
+    // 24bpp, and is confirmed working on real hardware. Direct Video is
+    // therefore no longer Portrait-only by hard constraint -- see that
+    // file's own extensive comments for its design, and "CRT Zoom"/
+    // "CRT H/V Position" further below for its live OSD calibration
+    // (Task #92). These two Orientation/Flip Monitor options remain
+    // scaled-VGA/HDMI-only as before; they don't affect or interact with
+    // Direct Video's own separate rotation.
     "O[1],Orientation,Horizontal,Vertical;",
     "O[2],Flip Monitor,Off,On;",
     "-;",
     "O[4:3],Aspect ratio,Original,Pixel Perfect,Full Screen;",
+    "-;",
+    // Task #92 follow-up #9: live calibration for the Direct Video CRT
+    // portrait-rotation buffer (direct_video_rotate.v) -- see that file
+    // for the full design rationale. These settings only affect the raw
+    // Analog IO / Direct Video CRT output; they have no effect on and no
+    // interaction with the scaled VGA/HDMI path (Orientation/Flip Monitor/
+    // Aspect ratio above, a completely separate signal chain) -- placed
+    // right below that "digital monitor" block per the user's explicit
+    // request, since it's conceptually the same kind of setting (display
+    // calibration) just for the other output path. CONF_STR has no real
+    // submenu/page mechanism in this codebase, so grouping + a shared
+    // "CRT ..." naming prefix + the "-;" dividers around them is how that
+    // separation is expressed, matching the pattern used in the sibling
+    // Rack 'Em Up project this design was ported from):
+    //   "CRT Frequency" picks a real-world-motivated output rate --
+    //   NTSC/Home (55.02Hz, THIS project's own confirmed-shimmer-free
+    //   value on a real Sony Trinitron), Arcade (54.25Hz, the board's own
+    //   native rate), or PAL (50.08Hz, true broadcast standard) -- see
+    //   direct_video_rotate.v's own osd_hz_preset comment for the full
+    //   derivation of each.
+    //   "CRT Sizing" picks a named preset, each an EXACT 7:8 lock (zero
+    //   rounding error) at a recognizable "Xp Fit" size, or "Custom".
+    //   "CRT Width"/"CRT Height" independently nudge width/height away
+    //   from whichever base CRT Sizing selected -- deliberately NOT
+    //   locked to each other (ported from Rack 'Em Up's own proven
+    //   design), since a user reaching for two explicitly separate
+    //   "Width"/"Height" controls has already opted into independent-axis
+    //   adjustment, unlike the retired single "Zoom" control this
+    //   replaces.
+    //   "CRT H/V Position" (unchanged from Task #92's original design)
+    //   move the picture without resizing it.
+    // All adjustable fields default to 0/"Default" -- adjust while
+    // watching your own CRT.
+    "O[61:60],CRT Frequency,NTSC/Home (55.02Hz),Arcade (54.25Hz),PAL (50.08Hz);",
+    "O[49:47],CRT Sizing,224p Fit (196x224),240p Fit (210x240),216p Fit (189x216),200p Fit (175x200),192p Fit (168x192),Custom;",
+    "O[54:50],CRT Width,Default,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15;",
+    "O[59:55],CRT Height,Default,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15;",
+    "O[41:37],CRT H Position,Default,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15;",
+    "O[46:42],CRT V Position,Default,-15,-14,-13,-12,-11,-10,-9,-8,-7,-6,-5,-4,-3,-2,-1,0,+1,+2,+3,+4,+5,+6,+7,+8,+9,+10,+11,+12,+13,+14,+15;",
     "-;",
     "O[6:5],Lives,7,5,3,2;",
     "O[16],Continues,5 Times,3 Times;",
@@ -2081,6 +2125,81 @@ wire rotate_ccw = effective_flip;
 wire flip       = effective_flip;
 wire video_rotated;
 
+// Task #24 revival (Task #90): Direct Video portrait-rotation buffer. Reuses
+// the same Orientation OSD bit/semantic as the DDR3 path above -- "Horizontal"
+// (default, no_rotate=0) already means "rotate this for me" for HDMI, so it
+// means the same thing here: rotate the Direct Video output into its true
+// 224x256 portrait shape, pillarboxed within the landscape frame. "Vertical"
+// (no_rotate=1) leaves Direct Video exactly as it is today, unmodified, for
+// MiSTerCade-style already-physically-rotated cabinets.
+wire dv_rotate_en = ~no_rotate;
+
+// Fixed 2026-09-04: this used to compare v_cnt against a bare 224 (i.e.
+// implicitly assuming the active window starts at v_cnt=0), which doesn't
+// match this project's own already-correct, MAME-verified raster spec
+// (debugging_log.md: MAME's screen.set_raw(24MHz/4, 384, 0, 256, 264, 16,
+// 240) -- vblank ends at v_cnt=16, starts again at v_cnt=240, already used
+// correctly by arcade_video's own VBlank input a few lines below). The old
+// window captured v_cnt 0-223 -- 16 lines of real vblank at the top that
+// aren't part of the image, and missing the real last 16 lines of active
+// content (224-239) entirely, every frame, since this feature's first
+// compile. That's what was cutting off the bottom of the play field on
+// real hardware (reported directly by the user on Stage 1: missing wall
+// content at the bottom, a black gap in the right wall).
+wire dv_wr_en        = ce_pix && (h_cnt < 11'd256) && (v_cnt >= 10'd16) && (v_cnt < 10'd240);
+wire dv_wr_frame_end = ce_pix && (h_cnt == 11'd0) && (v_cnt == 10'd0);
+
+wire        dv_hsync, dv_vsync, dv_active;
+wire [7:0]  dv_r, dv_g, dv_b;
+
+// Task #92 follow-up #9: live OSD calibration for direct_video_rotate.v --
+// status bits chosen from the 37+ range, well clear of every existing
+// 0-30 option bit used elsewhere in this file (see CONF_STR above).
+// Straight status[] slices, same convention this file already uses for
+// every other OSD option -- direct_video_rotate.v itself does the
+// sentinel-for-default decode (or, for CRT Sizing/Frequency, direct
+// index decode since every choice is a real named option) and registers
+// these before they reach its own pixel pipeline.
+wire [2:0] dv_osd_crt_sizing     = status[49:47];
+wire [4:0] dv_osd_crt_width_adj  = status[54:50];
+wire [4:0] dv_osd_crt_height_adj = status[59:55];
+wire [4:0] dv_osd_h_trim         = status[41:37];
+wire [4:0] dv_osd_v_trim         = status[46:42];
+wire [1:0] dv_osd_hz_preset      = status[61:60];
+
+direct_video_rotate direct_video_rotate_inst (
+    .clk               (clk_sys),
+    .ce_pix            (ce_pix),
+    .rst               (reset),
+    .wr_en             (dv_wr_en),
+    .osd_crt_sizing    (dv_osd_crt_sizing),
+    .osd_crt_width_adj (dv_osd_crt_width_adj),
+    .osd_crt_height_adj(dv_osd_crt_height_adj),
+    .osd_h_trim        (dv_osd_h_trim),
+    .osd_v_trim        (dv_osd_v_trim),
+    .osd_hz_preset     (dv_osd_hz_preset),
+    .wr_col       (h_cnt[7:0]),
+    .wr_row       (v_cnt[7:0] - 8'd16), // 0-relative within the real active window
+    .wr_r         (final_vga_r),
+    .wr_g         (final_vga_g),
+    .wr_b         (final_vga_b),
+    .wr_frame_end (dv_wr_frame_end),
+    // Task #90 follow-up (2026-09-04): a live joystick-driven position-trim
+    // feature was tried here and removed -- it pushed a combinational path
+    // (h_offset/v_offset through the scaler into the BRAM read-address
+    // register) past 48MHz timing closure (-2.454ns setup violation,
+    // confirmed via TimeQuest). It was also practically unreachable anyway
+    // (Test/Service has no default MiSTer input mapping). Replaced by
+    // H_CENTER_TRIM, a fixed constant in direct_video_rotate.v derived from
+    // direct pixel measurement of the real CRT.
+    .out_hsync    (dv_hsync),
+    .out_vsync    (dv_vsync),
+    .out_active   (dv_active),
+    .out_r        (dv_r),
+    .out_g        (dv_g),
+    .out_b        (dv_b)
+);
+
 // screen_rotate must consume arcade_video's OUTPUT (post-video_mixer VGA_R/
 // G/B/HS/VS/DE/CE_PIXEL), not the core's raw pre-mixer signals. Test 119
 // found that feeding it the raw signals (as this used to) corrupted the
@@ -2095,12 +2214,12 @@ wire video_rotated;
 screen_rotate screen_rotate (
     .CLK_VIDEO(CLK_VIDEO),
     .CE_PIXEL(CE_PIXEL),
-    .VGA_R(VGA_R),
-    .VGA_G(VGA_G),
-    .VGA_B(VGA_B),
-    .VGA_HS(VGA_HS),
-    .VGA_VS(VGA_VS),
-    .VGA_DE(VGA_DE),
+    .VGA_R(av_vga_r),
+    .VGA_G(av_vga_g),
+    .VGA_B(av_vga_b),
+    .VGA_HS(av_vga_hs),
+    .VGA_VS(av_vga_vs),
+    .VGA_DE(av_vga_de),
     .rotate_ccw(rotate_ccw),
     .no_rotate(no_rotate),
     .flip(flip),
@@ -3119,6 +3238,9 @@ wire [7:0] final_vga_g = OVERLAY_HIDDEN ? vga_g :
                           diag_row2_flags_on ? (diag_row2_flags_bit ? 8'hFF : 8'h00) : vga_g;
 wire [7:0] final_vga_b = OVERLAY_HIDDEN ? vga_b : (diag_box3 || diag_byte0 || diag_byte1 || diag_byte2 || diag_byte3 || diag_box_shadow_stuck || diag_box_ym2_retrig_ch7 || diag_box_ym2_retrig_ch8 || diag_box_ym1_audible_differed || diag_box_ym1_stuckconf_ch0 || diag_box_ym1_stuckconf_ch1 || diag_box_ym1_stuckconf_ch2 || diag_box_ym1_stuckconf_ch3 || diag_box_ym1_stuckconf_ch4 || diag_box_ym1_stuckconf_ch5 || diag_box_ym1_stuckconf_ch6 || diag_box_ym1_stuckconf_ch7 || diag_box_ym1_stuckconf_ch8 || diag_box_ym2_stuckconf_ch0 || diag_box_ym2_stuckconf_ch1 || diag_box_ym2_stuckconf_ch2 || diag_box_ym2_stuckconf_ch3 || diag_box_ym2_stuckconf_ch4 || diag_box_ym2_stuckconf_ch5 || diag_box_ym2_stuckconf_ch6 || diag_box_ym2_stuckconf_ch7 || diag_box_ym2_stuckconf_ch8 || diag_box_reset_after_boot || diag_box_reset_src_hw || diag_box_reset_src_status0 || diag_box_pause_cpu || diag_box_pause_cpu_ever || diag_box_reset_pulse_short || diag_box_ch7st_bit2 || diag_box_ch7st_bit1 || diag_box_ch7st_bit0 || diag_box_ch7rt_bit5 || diag_box_ch7rt_bit4 || diag_box_ch7rt_bit3 || diag_box_ch7rt_bit2 || diag_box_ch7rt_bit1 || diag_box_ch7rt_bit0 || diag_box_ch7kc_bit3 || diag_box_ch7kc_bit2 || diag_box_ch7kc_bit1 || diag_box_ch7kc_bit0 || diag_box_ch8st_bit2 || diag_box_ch8st_bit1 || diag_box_ch8st_bit0 || diag_box_ch8rt_bit5 || diag_box_ch8rt_bit4 || diag_box_ch8rt_bit3 || diag_box_ch8rt_bit2 || diag_box_ch8rt_bit1 || diag_box_ch8rt_bit0 || diag_box_ch8kc_bit3 || diag_box_ch8kc_bit2 || diag_box_ch8kc_bit1 || diag_box_ch8kc_bit0 || diag_box_keyon_ch0 || diag_box_keyon_ch1 || diag_box_keyon_ch2 || diag_box_keyon_ch3 || diag_box_keyon_ch4 || diag_box_keyon_ch5 || diag_box_keyon_ch6 || diag_box_keyon_ch7 || diag_box_keyon_ch8 || diag_box_chaudible_ch0 || diag_box_chaudible_ch1 || diag_box_chaudible_ch2 || diag_box_chaudible_ch3 || diag_box_chaudible_ch4 || diag_box_chaudible_ch5 || diag_box_chaudible_ch6 || diag_box_chaudible_ch7 || diag_box_chaudible_ch8 || diag_box_ch0_slrr_live_bit7 || diag_box_ch0_slrr_live_bit6 || diag_box_ch0_slrr_live_bit5 || diag_box_ch0_slrr_live_bit4 || diag_box_ch0_slrr_live_bit3 || diag_box_ch0_slrr_live_bit2 || diag_box_ch0_slrr_live_bit1 || diag_box_ch0_slrr_live_bit0 || diag_box_held_ch0 || diag_box_held_ch1 || diag_box_held_ch2 || diag_box_held_ch3 || diag_box_held_ch4 || diag_box_held_ch5 || diag_box_held_ch6 || diag_box_held_ch7 || diag_box_held_ch8 || diag_box_fade_bit7 || diag_box_fade_bit6 || diag_box_fade_bit5 || diag_box_fade_bit4 || diag_box_fade_bit3 || diag_box_fade_bit2 || diag_box_fade_bit1 || diag_box_fade_bit0 || diag_box_fade_active || diag_box_audio_alloff_live || diag_box_stuckch_sl_rr_written || diag_box_stuckdur_bit7 || diag_box_stuckdur_bit6 || diag_box_stuckdur_bit5 || diag_box_stuckdur_bit4 || diag_box_stuckdur_bit3 || diag_box_stuckdur_bit2 || diag_box_stuckdur_bit1 || diag_box_stuckdur_bit0 || diag_box_stuck_confirmed || diag_box_stuckch_sl_rr_bit7 || diag_box_stuckch_sl_rr_bit6 || diag_box_stuckch_sl_rr_bit5 || diag_box_stuckch_sl_rr_bit4 || diag_box_stuckch_sl_rr_bit3 || diag_box_stuckch_sl_rr_bit2 || diag_box_stuckch_sl_rr_bit1 || diag_box_stuckch_sl_rr_bit0 || diag_box_ch4_expkc_nz || diag_box_ch4_expksr || diag_box_ch4_b4written || diag_box_ch4_2cwritten || diag_box_ym2_keyon_ch0 || diag_box_ym2_keyon_ch1 || diag_box_ym2_keyon_ch2 || diag_box_ym2_keyon_ch3 || diag_box_ym2_keyon_ch4 || diag_box_ym2_keyon_ch5 || diag_box_ym2_keyon_ch6 || diag_box_ym2_keyon_ch7 || diag_box_ym2_keyon_ch8 || diag_box_ym2_audible_ch0 || diag_box_ym2_audible_ch1 || diag_box_ym2_audible_ch2 || diag_box_ym2_audible_ch3 || diag_box_ym2_audible_ch4 || diag_box_ym2_audible_ch5 || diag_box_ym2_audible_ch6 || diag_box_ym2_audible_ch7 || diag_box_ym2_audible_ch8 || diag_box_soundlatch_bit7 || diag_box_soundlatch_bit6 || diag_box_soundlatch_bit5 || diag_box_soundlatch_bit4 || diag_box_soundlatch_bit3 || diag_box_soundlatch_bit2 || diag_box_soundlatch_bit1 || diag_box_soundlatch_bit0 || diag_row_flags_on || diag_row2_flags_on) ? 8'h00 : vga_b;
 
+wire [7:0] av_vga_r, av_vga_g, av_vga_b;
+wire       av_vga_hs, av_vga_vs, av_vga_de;
+
 arcade_video #(256, 24) arcade_video (
     .clk_video(clk_sys),
     .ce_pix(ce_pix),
@@ -3129,17 +3251,29 @@ arcade_video #(256, 24) arcade_video (
     .VSync(v_sync),
     .CLK_VIDEO(CLK_VIDEO),
     .CE_PIXEL(CE_PIXEL),
-    .VGA_R(VGA_R),
-    .VGA_G(VGA_G),
-    .VGA_B(VGA_B),
-    .VGA_HS(VGA_HS),
-    .VGA_VS(VGA_VS),
-    .VGA_DE(VGA_DE),
+    .VGA_R(av_vga_r),
+    .VGA_G(av_vga_g),
+    .VGA_B(av_vga_b),
+    .VGA_HS(av_vga_hs),
+    .VGA_VS(av_vga_vs),
+    .VGA_DE(av_vga_de),
     .VGA_SL(VGA_SL),
     .fx(3'b000), // No "Scanlines" CONF_STR entry exists; was reading unrelated Mode/Continues/Coin1 bits
     .forced_scandoubler(0),
     .gamma_bus(gamma_bus)
 );
+
+// Task #24 revival (Task #90): when enabled, Direct Video's actual output
+// pins are driven by the rotation buffer instead of arcade_video's raw
+// (unrotated) output. This is specifically the Direct-Video-facing signal --
+// confirmed this session to be entirely separate from the DDR3/screen_rotate/
+// HDMI path above, which is unaffected by this mux either way.
+assign VGA_R  = dv_rotate_en ? dv_r      : av_vga_r;
+assign VGA_G  = dv_rotate_en ? dv_g      : av_vga_g;
+assign VGA_B  = dv_rotate_en ? dv_b      : av_vga_b;
+assign VGA_HS = dv_rotate_en ? dv_hsync  : av_vga_hs;
+assign VGA_VS = dv_rotate_en ? dv_vsync  : av_vga_vs;
+assign VGA_DE = dv_rotate_en ? dv_active : av_vga_de;
 
   reg [23:0] cpu_heartbeat;
   always @(posedge clk_sys) begin

@@ -6,6 +6,7 @@ set_global_assignment -name VERILOG_FILE rtl/mc6809/mc6809i.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hd6309/hd6309i.v
 set_global_assignment -name VERILOG_FILE rtl/k007342.v
 set_global_assignment -name VERILOG_FILE rtl/k007420.v
+set_global_assignment -name VERILOG_FILE rtl/direct_video_rotate.v
 set_global_assignment -name VHDL_FILE rtl/t80/T80.vhd
 set_global_assignment -name VHDL_FILE rtl/t80/T80_ALU.vhd
 set_global_assignment -name VHDL_FILE rtl/t80/T80_MCode.vhd

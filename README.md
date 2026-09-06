@@ -2,7 +2,7 @@
 
 **Status: Beta.** Fully playable on real hardware: video, sound, and
 input are all confirmed working. See the Status table below for the
-full subsystem breakdown and the **2026-08-27 sync** note for what
+full subsystem breakdown and the **2026-09-05 sync** note for what
 changed to reach this point.
 
 Author/creator: **Eggsecutioner**. This project was made with the assistance of
@@ -31,6 +31,37 @@ machines, isolation tests) needed to actually find and confirm bugs, none of
 which belongs in a public release build. This snapshot is re-synced
 periodically by hand-porting only the specific, proven fixes out of that
 working tree, with all diagnostic scaffolding stripped back out.
+
+**2026-09-05 sync -- Direct Video CRT rotation + live OSD calibration.**
+Task #24's original "Direct Video is Portrait-only" limitation (below) is
+resolved: a real on-chip rotation buffer (`rtl/direct_video_rotate.v`)
+now rotates the game's native 224x256 portrait raster into a proper
+224x256-in-a-landscape-frame picture for a normally-oriented (horizontal)
+CRT connected via the Analog IO board, confirmed on a real Sony
+Trinitron. Along the way, a real out-of-bounds BRAM read (confirmed via
+Verilator, a genuine bug not a false alarm) and a vertical-sync
+beat-frequency shimmer (a real analog phenomenon from this specific
+CRT's deflection oscillator not landing exactly on any single "safe"
+output frequency) were found and fixed/tuned around.
+
+Everything about this feature is now runtime-adjustable from the OSD, no
+recompile needed per TV: **CRT Frequency** (three real-world-motivated
+rates -- NTSC/Home 55.02Hz confirmed shimmer-free on this project's own
+CRT, Arcade 54.25Hz the board's own native rate, PAL 50.08Hz true
+broadcast standard), **CRT Sizing** (five named presets, each an exact
+7:8 lock with zero rounding error, plus a fully adjustable Custom mode),
+independent **CRT Width**/**CRT Height**, and **CRT H/V Position**. The
+sizing/independent-width-height pattern (and the three-preset frequency
+idea) was designed by **Gemini/Antigravity** for the sibling Rack 'Em Up
+project's own `direct_video_rotate.v` and ported here with every
+dimension recomputed for Battlantis's real native 7:8 ratio -- Rack 'Em
+Up's own numbers are 3:4, correct for that game but not this one, and
+copying them verbatim would have reintroduced a real text-legibility
+regression this project had separately already found and fixed (drifting
+away from 7:8 visibly distorts small character glyphs before it distorts
+sprites). An exhaustive sweep across all 24,576 sizing/width/height/trim/
+frequency combinations, and a full Verilator regression, both passed
+before this went anywhere near real hardware.
 
 **2026-08-27 sync, Beta.** The core is now fully playable end-to-end on
 real hardware. Highlights since the last sync:
@@ -152,7 +183,7 @@ ready-to-deploy Beta build.
 | K007342 tilemap (backgrounds, text, scroll) | Working: 256KB tile ROM served via a 64KB SDRAM-backed cache; a tile-cache aliasing bug (Task #25) and the "32 columns" scroll mode register (Task #18) have both been found and fixed |
 | K007420 sprites | Working: entire 256KB sprite ROM held statically in BRAM, no SDRAM sprite traffic |
 | Palette RAM | Working |
-| Screen rotation / OSD | Working: Orientation, Flip Monitor, and Aspect Ratio confirmed correct on hardware (MiSTerCade-style rotated cabinet monitor). Direct Video (CRT via the Analog IO board) is Portrait-only by design; see the project's task history for why a non-rotated-CRT Landscape mode isn't feasible on this FPGA's available on-chip RAM. |
+| Screen rotation / OSD | Working: Orientation, Flip Monitor, and Aspect Ratio confirmed correct on hardware (MiSTerCade-style rotated cabinet monitor, scaled VGA/HDMI path). Direct Video (CRT via the Analog IO board) now also supports a normally-oriented (horizontal) CRT via an on-chip rotation buffer, confirmed on real hardware, with live OSD calibration (CRT Frequency/Sizing/Width/Height/Position, no recompile needed) -- see the 2026-09-05 sync note above. |
 | DIP switches | Verified against the real Konami owner's manual (Task #9), which found and fixed a real default-value bug affecting 4 of 5 fields on one DIP |
 | Sound (Z80 + dual YM3812) | **Working, confirmed by listening test on real hardware (Task #8).** Root cause of the earlier silence was a T80 core accumulator register-grouping bug plus a one-cycle envelope-timing bug in the third-party `jtopl` OPL2 core |
 | Regional ROM revisions | World version G (default), World version F, and Japan version E all supported. See "Installing ROMs" |
@@ -184,14 +215,16 @@ ready-to-deploy Beta build.
   perceive any difference from real PCB reference footage in direct A/B
   testing, but not mathematically identical. Closing the remaining
   0.06% is left for community/further review.
-- **Direct Video is Portrait-only**: the CRT connected via the Analog IO
-  board (Direct Video mode) bypasses the DDR3 framebuffer/scaler
-  entirely by design, so there's no framebuffer available to rotate for
-  a Landscape/non-rotated-CRT setup. A dedicated on-chip frame buffer for
-  this was scoped but found infeasible, since this FPGA's design already
-  uses 100% of its on-chip RAM blocks. Landscape/non-rotated-CRT users
-  should use the existing Orientation/Flip Monitor/Aspect Ratio OSD
-  options via scaled VGA/HDMI output instead.
+- **Direct Video CRT tuning is TV-specific**: the on-chip rotation
+  buffer's OSD calibration (CRT Frequency/Sizing/Width/Height/Position)
+  covers a wide range, but the right combination for any given real CRT
+  is discovered empirically, not computed -- analog deflection circuits
+  vary unit to unit, especially with age. The shipped defaults were
+  tuned against one specific Sony Trinitron; a different set may need
+  its own adjustment, particularly CRT Frequency if you see a shimmering/
+  distorted picture (try the other two presets) or a rolling picture
+  (your set's vertical hold likely can't lock that far from 60Hz -- try
+  a frequency closer to standard NTSC/PAL instead).
 - **Palette RAM addressing question, not yet resolved**: the display
   read path only forms a 9-bit palette index into a 1024-entry palette
   RAM array that the CPU can write with a full 10-bit address, meaning
