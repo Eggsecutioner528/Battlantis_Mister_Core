@@ -1,253 +1,104 @@
-# Battlantis - MiSTer FPGA Core
+# Battlantis (Konami GX777) MiSTer FPGA Core
 
-**Status: Beta.** Fully playable on real hardware: video, sound, and
-input are all confirmed working. See the Status table below for the
-full subsystem breakdown and the **2026-09-05 sync** note for what
-changed to reach this point.
+A MiSTer FPGA port of Konami's 1987 arcade game **Battlantis**, written from scratch in Verilog and SystemVerilog around the real board's chips.
 
-Author/creator: **Eggsecutioner**. This project was made with the assistance of
-Gemini and Claude. This core is meant to be free and no one shall charge for
-this core.
+**Version 1.0** (release `releases/Battlantis_20261010.rbf`).
 
-This is a from-scratch Verilog/SystemVerilog reimplementation of the 1987 Konami arcade
-game **Battlantis** (Twin-16 hardware family: MC6809 main CPU, Z80 + dual
-YM3812 sound, K007342 tilemap generator, K007420 sprite generator) for the
-[MiSTer FPGA](https://github.com/MiSTer-devel) platform.
+One core, one `.mra`: you choose the version in the OSD (**Game Version**):
 
-This is not based on Jotego's JT-series cores. It was built by cross-referencing
-MAME's driver source (`battlnts.cpp`, `k007342.cpp`, `k007420.cpp`) for
-ground-truth bit-level timing and addressing, verified against real Battlantis
-arcade hardware.  However this work would not have been possible without Jotego's work
-mainly thanks to his work on other cores and documentation.  I am deeply greatful
-for this information.
+- Battlantis (version G, World)
+- Battlantis (version F)
+- Battlantis (Japan version E)
 
-This folder is a clean snapshot of the working tree, most recently re-synced
-**2026-08-16** (containing only the files actually compiled into the core,
-audited against `Template.qsf` / `files.qip` and every module instantiation,
-not just copied wholesale). The active working tree runs far ahead of this
-snapshot at any given time -- it accumulates diagnostic instrumentation and
-in-progress experiments (SignalTap-style overlays, shadow-verification state
-machines, isolation tests) needed to actually find and confirm bugs, none of
-which belongs in a public release build. This snapshot is re-synced
-periodically by hand-porting only the specific, proven fixes out of that
-working tree, with all diagnostic scaffolding stripped back out.
+This is the "Simple Arcade" build: the picture on the HDMI output can be rotated, flipped and shaped from the OSD, and the analog (CRT) output is left as the raw, unrotated raster the arcade board itself produces, with only picture position options.
 
-**2026-09-05 sync -- Direct Video CRT rotation + live OSD calibration.**
-Task #24's original "Direct Video is Portrait-only" limitation (below) is
-resolved: a real on-chip rotation buffer (`rtl/direct_video_rotate.v`)
-now rotates the game's native 224x256 portrait raster into a proper
-224x256-in-a-landscape-frame picture for a normally-oriented (horizontal)
-CRT connected via the Analog IO board, confirmed on a real Sony
-Trinitron. Along the way, a real out-of-bounds BRAM read (confirmed via
-Verilator, a genuine bug not a false alarm) and a vertical-sync
-beat-frequency shimmer (a real analog phenomenon from this specific
-CRT's deflection oscillator not landing exactly on any single "safe"
-output frequency) were found and fixed/tuned around.
+The earlier beta releases (v0.1 to v0.3, with the on-chip CRT rotation buffer) are kept on the `crt-rotation` branch.
 
-Everything about this feature is now runtime-adjustable from the OSD, no
-recompile needed per TV: **CRT Frequency** (three real-world-motivated
-rates -- NTSC/Home 55.02Hz confirmed shimmer-free on this project's own
-CRT, Arcade 54.25Hz the board's own native rate, PAL 50.08Hz true
-broadcast standard), **CRT Sizing** (five named presets, each an exact
-7:8 lock with zero rounding error, plus a fully adjustable Custom mode),
-independent **CRT Width**/**CRT Height**, and **CRT H/V Position**. The
-sizing/independent-width-height pattern (and the three-preset frequency
-idea) was designed by **Gemini/Antigravity** for the sibling Rack 'Em Up
-project's own `direct_video_rotate.v` and ported here with every
-dimension recomputed for Battlantis's real native 7:8 ratio -- Rack 'Em
-Up's own numbers are 3:4, correct for that game but not this one, and
-copying them verbatim would have reintroduced a real text-legibility
-regression this project had separately already found and fixed (drifting
-away from 7:8 visibly distorts small character glyphs before it distorts
-sprites). An exhaustive sweep across all 24,576 sizing/width/height/trim/
-frequency combinations, and a full Verilator regression, both passed
-before this went anywhere near real hardware.
+---
 
-**2026-08-27 sync, Beta.** The core is now fully playable end-to-end on
-real hardware. Highlights since the last sync:
-- **Sound fully fixed** (Task #8, closed): a one-cycle-early timing bug in
-  the third-party `jtopl` OPL2 core's envelope-generator persistent-storage
-  delay lines, plus an earlier T80 core accumulator register-grouping bug
-  that had been silently blocking the sound CPU from booting at all.
-  Confirmed by direct listening test on real hardware.
-- **Stage 1 speed fixed** (Task #15, closed): the game played roughly
-  36-38% too slow compared to real PCB reference footage. Root cause: the
-  6809's `LEAX -1,X`-style instructions leave `$FFFF` on the address bus
-  during their internal-arithmetic cycle (real, documented 6809 behavior),
-  which this core's IRQ-acknowledge logic was mistaking for a genuine
-  interrupt-vector fetch and silently acking real vblank interrupts before
-  the CPU could service them. Fixed by wiring the CPU's real `BS`/`BA`
-  (Bus Status/Bus Available) signals and using the genuine hardware
-  acknowledge condition instead. Confirmed on real hardware, the residual
-  timing gap versus reference footage is now within ~0.06%.
-- **DIP switches verified against the real owner's manual** (Task #9):
-  found and fixed a real discrepancy in one DIP's fresh-boot default value
-  that had been wrong on 4 of 5 fields.
-- A tile-cache aliasing bug (Task #25) and a K007342 "32 columns" scroll
-  mode register (Task #18) were also found and fixed.
-- OSD menu reordered for a more logical layout; the non-functional "Flip
-  Screen" option (confirmed on hardware to do nothing) was removed.
-- Two additional real ROM revisions added: World version F and Japan
-  version E, alongside the existing World version G. See "Installing
-  ROMs" below.
-- A significant dead-code cleanup pass removed ~75 leftover diagnostic
-  signals plus 101 files/~20,800 lines of unreferenced third-party
-  scaffolding that never compiled into the core in the first place.
+## About the Game
 
-**2026-08-16 sync -- major milestone**: with a boot-time hang found and fixed
-(a video timing change had an unresolved side effect; reverted to the prior,
-confirmed-working value pending further investigation), the core could
-finally be played through for the first time in a while, surfacing and
-confirming two significant fixes: (1) a K007342 sprite Y-wrap register
-(0x02 bit 7) was completely unimplemented, causing a full-screen-height
-duplicate "shadow" on some sprites -- implemented and confirmed fixed on
-hardware. (2) A one-cycle-early BRAM read in the sprite fetch pipeline was
-producing shear/ghosting specifically during sprite zoom transitions,
-including visible seams between the separate pieces that make up composite
-multi-sprite bosses (e.g. the Red Dragon) -- fixed by correcting the tile
-boundary math to match MAME's real per-tile rounding exactly (see
-`rtl/tile_bound1-4.hex`, replacing the previous single flat reciprocal
-table). Both fixes are confirmed on real hardware; the previously-listed
-"sprite halo/outline artifact" and "Red Dragon" known issues below are
-resolved as of this sync. **Sound was also directly tested for the first
-time this sync and is confirmed NOT working** -- see Known Issues.
+Battlantis is a fixed screen shooter: you destroy every enemy on the screen to move on to the next stage, up to the Emperor Asmodeus on stage 16. It runs on Konami's **GX777** board, the same chip family as Rack 'Em Up (GX765) and Blades of Steel (GX797): a K007342 tilemap chip, a K007420 sprite chip, an HD6309E main CPU, a Z80 sound CPU and two YM3812 FM chips. The game is a vertical monitor game.
 
-**2026-08-15 sync**: a full architecture change from the previous snapshot --
-both the background tilemap (`k007342.v`) and sprite engine (`k007420.v`)
-changed how they store ROM data. Sprites now hold their entire 256KB ROM
-statically in BRAM (previously a 64KB cache plus six hand-patched slots for
-specific problem addresses, falling back to SDRAM for everything else), which
-eliminated sprite SDRAM traffic entirely. That freed enough BRAM for
-backgrounds to move the other way: instead of a full 256KB local ROM copy, a
-64KB direct-mapped cache now serves tiles from BRAM and fills itself from
-SDRAM on a miss. This also fixed the actual root cause of the black-background
-bug from the previous snapshot: the SDRAM arbiter's reset was tied to a signal
-the MiSTer framework holds asserted for the entire ROM download (not just
-initial core bring-up, as commonly assumed), freezing the arbiter and
-silently blocking every SDRAM write during download -- backgrounds render
-correctly now that the arbiter's reset excludes the download window.
+---
 
-## Installing ROMs
+## Installing
 
-This repo ships the compiled core (`output_files/Battlantis.rbf`) and the
-`.mra` files, but **not the arcade ROM dump itself**. Battlantis is
-Konami's copyrighted game data, and redistributing it isn't something
-this project does, in line with every other MiSTer core. You'll need to
-legally obtain your own dump and package it yourself:
+You need the MiSTer SDRAM module (the sprite ROM lives in SDRAM) and your own legally obtained ROM set in `/media/fat/games/mame/`:
 
-1. Get a `battlnts.zip` (MAME romset name) containing (at minimum) the
-   World version G set: `777_g02.7e`, `777_g03.8e`, `777_c01.10a`,
-   `777c04.13a`, `777c05.13e`.
-2. For the World version F or Japan version E variants (optional,
-   `Battlantis (World).mra` / `Battlantis (Japan).mra`), add
-   `battlntsa/777_f02.7e` + `battlntsa/777_f03.8e`, or
-   `battlntsj/777_e02.7e` + `battlntsj/777_e03.8e`, into the same zip
-   under those subfolder names (standard MAME clone-set layout, since
-   the sound/tile/sprite ROMs are byte-identical across all three
-   revisions and only need to exist once at the zip's top level).
-   Once the zip is in place, pick which revision to play from the
-   MiSTer's Arcade menu itself: `Battlantis.mra` (World, version G,
-   default), `Battlantis (World).mra` (World, version F, confirmed by
-   an embedded "WELCOME TO GX777 WORLD" splash string in its ROM that
-   version G lacks), and `Battlantis (Japan).mra` all appear as
-   separate entries there, each launching the same core with a
-   different ROM revision loaded.
-3. Copy `battlnts.zip` to your MiSTer's ROM search path for this core
-   (typically `games/Battlantis/`; MiSTer resolves this from more than
-   one folder depending on your setup, so check where your other arcade
-   ROMs already live if this path doesn't work).
-4. Copy `Battlantis.rbf` to `/media/fat/_Arcade/cores/` and the `.mra`
-   file(s) you want to `/media/fat/_Arcade/` on the MiSTer's SD card.
+- `battlnts.zip` (MAME name `battlnts`). It must also hold the files of the other two versions in the folders `battlntsa` (version F) and `battlntsj` (Japan version E), exactly as in the full MAME set.
 
-## Building
+1. Copy `Battlantis_20261010.rbf` to `/media/fat/_Arcade/cores/`.
+2. Copy `Battlantis.mra` to `/media/fat/_Arcade/`.
+3. Put `battlnts.zip` in `/media/fat/games/mame/`.
+4. Start **Battlantis** from the Arcade menu.
 
-Requires Quartus Prime 17.0.x (Lite is fine) targeting Cyclone V
-(`5CGXFC7C7F23C8`, the MiSTer main board).
+All three versions are loaded together. This repository contains no ROM data.
 
-```
-quartus_sh --flow compile Template
-```
+---
 
-This produces `output_files/Template.rbf`. To deploy manually, copy it to
-your MiSTer at `/media/fat/_Arcade/cores/Battlantis.rbf` (default MiSTer
-credentials are `root` / `1`), along with whichever `.mra` file(s) you
-want to `/media/fat/_Arcade/`. If you'd rather not build from source,
-`output_files/Battlantis.rbf` in this repo is already a compiled,
-ready-to-deploy Beta build.
+## OSD Options
 
-## Status
+The video options live in two sub menus, **HDMI Video** and **CRT Video** (press Back to return to the main menu).
 
-| Subsystem | Status |
-|---|---|
-| MC6809 main CPU | Working: boots, runs game logic, real BS/BA-based interrupt handling (Task #15) |
-| K007342 tilemap (backgrounds, text, scroll) | Working: 256KB tile ROM served via a 64KB SDRAM-backed cache; a tile-cache aliasing bug (Task #25) and the "32 columns" scroll mode register (Task #18) have both been found and fixed |
-| K007420 sprites | Working: entire 256KB sprite ROM held statically in BRAM, no SDRAM sprite traffic |
-| Palette RAM | Working |
-| Screen rotation / OSD | Working: Orientation, Flip Monitor, and Aspect Ratio confirmed correct on hardware (MiSTerCade-style rotated cabinet monitor, scaled VGA/HDMI path). Direct Video (CRT via the Analog IO board) now also supports a normally-oriented (horizontal) CRT via an on-chip rotation buffer, confirmed on real hardware, with live OSD calibration (CRT Frequency/Sizing/Width/Height/Position, no recompile needed) -- see the 2026-09-05 sync note above. |
-| DIP switches | Verified against the real Konami owner's manual (Task #9), which found and fixed a real default-value bug affecting 4 of 5 fields on one DIP |
-| Sound (Z80 + dual YM3812) | **Working, confirmed by listening test on real hardware (Task #8).** Root cause of the earlier silence was a T80 core accumulator register-grouping bug plus a one-cycle envelope-timing bug in the third-party `jtopl` OPL2 core |
-| Regional ROM revisions | World version G (default), World version F, and Japan version E all supported. See "Installing ROMs" |
-| OSD Test/Game mode | Switching this option triggers an automatic game reset, so the board boots cleanly into whichever mode was just selected instead of changing the DIP mid-run |
+**HDMI Video**
 
-## Planned
+- **Orientation**: Horizontal (default) rotates the picture so the vertical monitor game stands upright on a normal landscape display, with black bars at the sides. Vertical sends the raw raster, for a display that is itself mounted vertically.
+- **Flip Monitor**: turns the picture 180 degrees.
+- **Aspect ratio**: Original (the arcade monitor's 4:3, shown as 3:4 once rotated), Pixel Perfect (square pixels), Full Screen.
 
-- **In-core, live region selector**: right now, switching between the
-  World/World (version F)/Japan ROM revisions means picking a different
-  `.mra` entry from the MiSTer's own Arcade menu (see "Installing ROMs").
-  A true in-core OSD option that switches revisions live and resets the
-  game, without leaving the running core, is planned but not yet done:
-  the chip is already at 100% of its physical on-chip RAM blocks, so all
-  three ROM revisions can't just be held statically in BRAM the way the
-  CPU ROM is today. The real path is converting the CPU ROM from a
-  static BRAM copy into an SDRAM-backed cache holding all three
-  revisions, the same pattern already proven on the tilemap engine. That
-  is a real, working pattern on this hardware, not a dead end, but the
-  CPU ROM is currently the one subsystem with zero-wait-state
-  guarantees, which is exactly what the Task #15 timing fix relies on,
-  so this needs careful re-verification on real hardware before it can
-  be called done, not just a quick patch.
+**CRT Video** (analog output only, HDMI is not affected)
 
-## Known issues
+- **CRT V Position** and **CRT H Position** nudge the picture on the tube. The analog output is not rotated or reshaped: it carries the raw 15 kHz raster of the real board, so a vertical arcade monitor or a CRT turned on its side shows the game exactly as the original hardware would.
 
-- **Stage 1 timing residual gap**: after the Task #15 interrupt-ack fix,
-  the core's steady-state vblank-service rate is 99.94% (vs. real
-  hardware's effective ~100%). Close enough that the user could not
-  perceive any difference from real PCB reference footage in direct A/B
-  testing, but not mathematically identical. Closing the remaining
-  0.06% is left for community/further review.
-- **Direct Video CRT tuning is TV-specific**: the on-chip rotation
-  buffer's OSD calibration (CRT Frequency/Sizing/Width/Height/Position)
-  covers a wide range, but the right combination for any given real CRT
-  is discovered empirically, not computed -- analog deflection circuits
-  vary unit to unit, especially with age. The shipped defaults were
-  tuned against one specific Sony Trinitron; a different set may need
-  its own adjustment, particularly CRT Frequency if you see a shimmering/
-  distorted picture (try the other two presets) or a rolling picture
-  (your set's vertical hold likely can't lock that far from 60Hz -- try
-  a frequency closer to standard NTSC/PAL instead).
-- **Palette RAM addressing question, not yet resolved**: the display
-  read path only forms a 9-bit palette index into a 1024-entry palette
-  RAM array that the CPU can write with a full 10-bit address, meaning
-  entries 512-1023 are writable but never displayed. Flagged during a
-  code-cleanup pass as a genuine open functional question (is this
-  correct real-hardware behavior, or a bug?) rather than something
-  patched blindly. Needs checking against real K007342 documentation
-  or hardware before any change.
+**Game settings** (the first entry of every option is the factory default, so a fresh install plays like the real board):
 
-## Third-party cores
+- **Game Version**: Battlantis (version G), Battlantis (version F), Battlantis (Japan version E). Changing it restarts the game.
+- Lives: 3, 5, 7 or 2
+- Bonus Life: 30k and every 70k, 40k and every 80k, 40k, 50k
+- Difficulty: Normal, Easy, Difficult, Very Difficult
+- Demo Sounds: On or Off
+- Continues: 5 or 3 times
+- Cabinet: Upright or Cocktail
+- Upright Controls: Single or Dual
+- Flip Screen: Off or On
+- Service Mode: Off or On (toggling it restarts the game, because the game only reads the service switch at start up)
+- Coin A and Coin B: 1 coin 1 credit by default, with the full 16 entry Konami coinage table and a Free Play or No Coin B entry
 
-- `rtl/mc6809/mc6809i.v` - Greg Miller's cycle-accurate MC6809 core. License:
-  see `rtl/mc6809/documentation/LICENSE.md`.
-- `rtl/t80/*.vhd` - the open-source T80 Z80-compatible core (used via the
-  `T80s` wrapper, instantiated from `rtl/cpu_z80.v`).
-- `rtl/jtopl/hdl/*.v` - Jose Tejada's (Jotego) `jtopl` YM3812/OPL2 core.
-  License: GPLv3, see `rtl/jtopl/LICENSE`.
+**Controls** are mirrored for the two players: the first controller is player 1 and the second controller is player 2, each with the same layout. The buttons are Fire, Coin and Start. Map each controller model once in MiSTer's own button mapping screen (Define joystick buttons); two identical pads share the mapping. On the keyboard, 5 and 6 are the coins, 1 and 2 are the starts, and player 2 plays on R F D G with A for the button.
 
-## Notes on this file set
+---
 
-- `rtl/jtkcpu/*` (Jotego's HD6309 core) and `rtl/mc6809/mc6809.v` (a wrapper
-  module, `mc6809is`, adapting `jtkcpu` to the MC6809 interface) - neither is
-  ever instantiated by `Battlantis.sv`, which uses `mc6809i` (Greg Miller's
-  core) directly.
-- `rtl/t80/T80pa.vhd` - an alternate T80 top-level wrapper not used; the
-  design instantiates `T80s` only.
+## How This Core Came Together
+
+1. The real board was studied from the schematics and the MAME driver (`battlnts.cpp`, which covers the whole GX765 and GX777 family).
+2. The CPU, sound and chip cores were brought in from open projects (see the credits) and checked against MAME frame by frame, using a GPU accelerated pixel comparison of this core's picture against MAME's.
+3. The black holes and lines that earlier builds showed in the background were a memory timing problem: the background graphics were read from SDRAM and sometimes did not reach the screen in time. In this version the whole background tile ROM lives in on chip memory, which always answers on time, and only the sprite ROM is read through an SDRAM cache. The holes are gone in all three versions, including the stage 16 boss, the Emperor Asmodeus.
+4. All three versions are loaded into SDRAM at once; a small copy engine moves the chosen version's program and tile ROM into the on chip memory and restarts the game whenever Game Version changes.
+
+---
+
+## Known Open Issues
+
+- The analog output is the raw raster and is not rotated: a vertical arcade monitor or a CRT turned on its side is needed to see the game upright on it. A rotated analog output is planned as a later update.
+- Game speed and sound have not been measured side by side against a real board.
+
+---
+
+## A Note on Development Process
+
+This core was developed with substantial assistance from **Claude** (Anthropic's AI assistant) and, earlier in the project, Google's **Gemini**, used for RTL implementation, cross checking against the MAME driver and the schematics, simulation and hardware debugging. It is disclosed here so nobody mistakes this for an entirely machine generated core: the direction, the testing on a real MiSTer, every decision about what was acceptable and the final judgement of what works were the author's.
+
+---
+
+## Bibliography and Credits
+
+- **Roger Taylor**: [Nitrobotics/hd6309](https://github.com/Nitrobotics/hd6309), the Hitachi HD6309 native mode CPU core the main program needs.
+- **Jose Tejada (jotego)**: the `jtopl` (YM3812 / OPL2) core from the [JTCORES](https://github.com/jotego/jtcores) project, GPL 3, used for both FM chips. His other cores and documentation were also a constant reference.
+- **Daniel Wallner and the T80 contributors**: the T80 Z80 core used for the sound CPU.
+- **Sorgelig and the MiSTer FPGA project**: the platform framework (`sys/`, `hps_io`, `arcade_video`, `screen_rotate`) and the SDRAM controller this core's `sdram.sv` is built on.
+- **The MAME project** (mamedev.org): `battlnts.cpp`, `k007342.cpp`, `k007420.cpp` and `konamipt.h` were the authoritative reference for the ROM layout, the chip behaviour and the draw order.
+- **Konami**: the original 1987 arcade hardware and games. All game assets and ROM content remain Konami's property.
+- The Rack 'Em Up / The Hustler and Blades of Steel cores by the same author, whose chip implementations this core shares.
+
+The code is released under the GNU General Public License (see `LICENSE` and the header of each file; the `jt*` cores are GPL 3).

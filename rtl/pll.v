@@ -10,6 +10,9 @@ module pll (
 		input  wire  rst,      //   reset.reset
 		output wire  outclk_0, // outclk0.clk
 		output wire  outclk_1, // outclk1.clk -- phase-shifted SDRAM_CLK source, see pll_0002.v
+		output wire  outclk_2, // outclk2.clk -- 2026-09-18: Direct Video genlock clock (NTSC/Home), see pll_0002.v
+		output wire  outclk_3, // outclk3.clk -- 2026-09-19: Direct Video genlock clock (Arcade), see pll_0002.v
+		output wire  outclk_4, // outclk4.clk -- 2026-09-19: Direct Video genlock clock (PAL), see pll_0002.v
 		output wire  locked    //  locked.export
 	);
 
@@ -18,6 +21,9 @@ module pll (
 		.rst      (rst),      //   reset.reset
 		.outclk_0 (outclk_0), // outclk0.clk
 		.outclk_1 (outclk_1), // outclk1.clk
+		.outclk_2 (outclk_2), // outclk2.clk
+		.outclk_3 (outclk_3), // outclk3.clk
+		.outclk_4 (outclk_4), // outclk4.clk
 		.locked   (locked)    //  locked.export
 	);
 

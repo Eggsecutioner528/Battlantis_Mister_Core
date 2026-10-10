@@ -38,8 +38,34 @@
 // avoids.
 module direct_video_rotate (
     input clk,
-    input ce_pix,   // native+output pixel-rate enable (both run at 6MHz)
+    input ce_pix,   // native write-side pixel-rate enable (6MHz)
     input rst,
+    // 2026-09-18: genlock fix for a confirmed real tearing bug (see
+    // project_history/TASKS.md's 2026-09-18 entry -- an empirical
+    // simulation test showed nearly every output frame mixing content from
+    // two different native frames, because native's fixed V_TOTAL=262
+    // frame period was never an integer multiple of any existing output
+    // V_TOTAL_r's own frame period, so the double-buffer's "pick whichever
+    // buffer isn't being written, once per output frame" guarantee didn't
+    // actually hold -- the writer could start overwriting the buffer
+    // currently on screen partway through its scan-out). out_clk is a
+    // genuinely independent clock (~6.045801527 MHz, see pll_0002.v's own
+    // port comment for the derivation) making V_TOTAL_r=264's own frame
+    // period an EXACT integer multiple (1x) of native's real frame period
+    // -- true genlock, not just a closer scanline-count guess. 2026-09-19:
+    // Arcade (V_TOTAL_r=288) and PAL (V_TOTAL_r=312) now get their OWN
+    // separately-tuned genlocked clocks the same way (pll_0002.v's
+    // outclk_3/outclk_4), selected at runtime by Battlantis.sv's
+    // altclkctrl-based dv_clk_mux from the same osd_hz_preset input this
+    // module already uses for its V_TOTAL_r lookup below -- so the clock
+    // SOURCE and the V_TOTAL_r VALUE switch together off one OSD
+    // selection. All three presets verified tear-free in Verilator
+    // (sim_scratch/dv_scale_test/sim_main_tear_multi.cpp), though real
+    // hardware confirmation of the actual glitch-free clock switchover
+    // (a real-silicon-only property Verilator's ideal clock model cannot
+    // validate, same caveat as the original NTSC/Home genlock) is still
+    // needed.
+    input out_clk,
 
     // Write side: native raw raster, 256 active columns x 224 active rows.
     input        wr_en,        // pulse once per native active pixel
@@ -48,26 +74,84 @@ module direct_video_rotate (
     input  [7:0] wr_r, wr_g, wr_b, // native full 8-bit color to capture
     input        wr_frame_end, // pulse once at native vblank boundary (swap)
 
-    // Task #92 follow-up #9: retired osd_zoom (a single ratio-locked-only
-    // control) in favor of Gemini/Rack 'Em Up's richer pattern -- CRT
-    // Sizing (named presets) plus independent Width/Height, all computed
-    // for Battlantis's real native 7:8 ratio (see the CRT Sizing lookup
-    // further down for the full derivation and the safety reasoning for
-    // why independent-axis adjustment is acceptable here, unlike the
-    // original zoom-drift regression). osd_h_trim/osd_v_trim (unchanged
-    // from Task #92's original design) move the picture without resizing
-    // it. Every field uses this project's established sentinel-for-
-    // default convention: 0 = default, 1-31 = offset -15..+15.
-    input  [2:0] osd_crt_sizing,     // 0-4=named 7:8 presets, 5=Custom
-    input  [4:0] osd_crt_width_adj,  // independent width nudge, steps of 6px
-    input  [4:0] osd_crt_height_adj, // independent height nudge, steps of 4 lines
+    // 2026-10-01: un-retired the single ratio-locked osd_zoom control,
+    // dropping the CRT Sizing/Width/Height preset-list pattern it had been
+    // replaced by. User feedback: picking a named size from a list was an
+    // unwelcome UX, and independent Width/Height adjustment -- while each
+    // individually 7:8-locked at its own base -- lets a user drift the two
+    // away from each other, which is exactly the class of distortion this
+    // file's own history (the 2026-09-05 "text becoming gibberish"
+    // regression) already identified as the real cost of independent-axis
+    // sizing. osd_zoom scales BOTH axes together through a lookup table
+    // that holds every step within a fraction of a percent of the true
+    // native 224:256 ratio -- the aspect ratio cannot drift no matter what
+    // a user picks. osd_h_trim/osd_v_trim (unchanged) move the picture
+    // without resizing it.
+    //
+    // 2026-10-02: widened 5-bit/32-step (bidirectional, centered on a
+    // default) to 6-bit/64-step, per user request to push the top end
+    // closer to true native size with finer control. The old table's
+    // smaller sizes are dropped entirely -- "Default" (osd_zoom=0) is now
+    // the FLOOR of the range (172x197, the same picture this core has
+    // shown since the Zoom control was introduced), and 1-63 dial upward
+    // toward 203x232, the practical ceiling for this hardware's NTSC/Home
+    // CRT Timing preset (264-line V_TOTAL) -- going further eats into real
+    // vertical blanking margin for a diminishing, increasingly risky
+    // return; the Arcade/PAL presets have more spare margin and inherit
+    // extra headroom automatically from the same table since the
+    // sync-safety clamp further down is already preset-aware. Since the
+    // range is no longer centered, osd_zoom indexes the table directly --
+    // no sentinel-offset math needed, unlike the old bidirectional design.
+    input  [5:0] osd_zoom,
     input  [4:0] osd_h_trim,
     input  [4:0] osd_v_trim,
+    // 2026-10-02: CRT H Stretch/V Stretch (an independent fine-tune ON TOP
+    // of osd_zoom's base size) removed after real-hardware feedback found
+    // it produces edge-clamp artifacts ("dead pixels") whenever it widens
+    // the sampled field of view past the native 256x224 source -- the
+    // active window size (h_active_r) never changed, only the sampling
+    // ratio did, so "stretching" past native pushed the source index past
+    // its valid 0-255/0-223 range and the existing clamp just repeated the
+    // last valid edge pixel. Replaced by osd_h_crunch below, which fixes
+    // this structurally by shrinking h_active_r itself (so it can never
+    // need to sample outside the native source) instead of just changing
+    // the ratio within a fixed-size window.
+    //
+    // osd_h_crunch: width-only squash, for fitting Horizontal mode's
+    // naturally-oversized picture onto a given TV. Unlike osd_zoom (which
+    // scales both axes together, aspect-locked), this touches ONLY the
+    // h-axis (h_active_r + scale_num_h_r) -- v_active_r/scale_num_v_r are
+    // completely untouched. This is a deliberate aspect-ratio distortion
+    // (same idea as a real CRT's independent H-SIZE control), not a bug.
+    // Always shrinks from whatever osd_zoom already selected; never widens
+    // past it, so it structurally cannot hit the Stretch failure class
+    // above -- every combination still samples strictly within the native
+    // 256x224 source. Deliberately coarse: a flat 16-entry delta table
+    // (crunch=0 is an exact no-op; 1-15 shave 2 h_active_r columns/step,
+    // 30 columns/~17% max at osd_zoom's floor), applied as a fixed offset
+    // on top of whichever osd_zoom table entry is active -- this is an
+    // approximation (verified by exhaustive sweep to be within ~6.3% of
+    // the exact native-width ratio at the far corner of the zoom/crunch
+    // combination space, vs. Zoom's own ~0.2%), acceptable since this is
+    // explicitly a "fit it on the screen" control, not a precision one.
+    // Register headroom reverified for the combined worst case (scale_num
+    // up to 1617, row_numer product up to 242,348 -- both comfortably
+    // inside the already-widened 16-bit/20-bit registers from the Stretch
+    // rebuild, nowhere near their ceilings).
+    input  [3:0] osd_h_crunch,
     // Task #92 follow-up: which output frequency preset to run at --
     // 0=NTSC/Home, 1=Arcade, 2=PAL (encoding 3 unused). See the registered
     // V_TOTAL_r/VSYNC_START_r/VSYNC_END_r lookup table further down for the
     // full derivation of each preset's numbers.
     input  [1:0] osd_hz_preset,
+    // 2026-09-18: this module had no flip/rotation-direction input at all --
+    // "Flip Monitor" (Battlantis.sv's flip_monitor) was only ever wired
+    // into the HDMI screen_rotate path, doing nothing on Direct Video's
+    // rotated (Vertical-orientation) path, exactly the scenario a user
+    // whose CRT is physically mounted in a fixed orientation needs. Adds
+    // the second of the two possible 90-degree rotation directions (see
+    // native_h/native_v below) -- a real correction, not a cosmetic toggle.
+    input        osd_flip,
 
     // Output side: fully self-contained timing generator + rotated (and,
     // for some modes, scaled) pixel stream. H_total=384 @ ce_pix
@@ -80,6 +164,16 @@ module direct_video_rotate (
     output           out_active,  // true within the centered active window
     output     [7:0] out_r, out_g, out_b // expanded back to 8 bits
 );
+
+    // 2026-09-18: rst arrives synchronous to clk_sys (Battlantis.sv's own
+    // global reset); sampling it directly in the out_clk domain risks
+    // metastability on deassertion. Standard 2-flop synchronizer, one per
+    // clock domain that consumes it.
+    reg out_rst_d1, out_rst;
+    always @(posedge out_clk) begin
+        out_rst_d1 <= rst;
+        out_rst    <= out_rst_d1;
+    end
 
     // ------------------------------------------------------------------
     // Output-side timing generator. Horizontal is ALWAYS unchanged from
@@ -406,13 +500,20 @@ module direct_video_rotate (
     // H_ACT_START/END/V_ACT_START/END pipeline, so adding these as more
     // registered LUT outputs costs zero additional combinational depth on
     // that already-timing-sensitive path.
+    // 2026-09-18: NTSC/Home changed from V_TOTAL=284 to V_TOTAL=264 --
+    // this is the ONE value out_clk was specifically tuned to genlock (see
+    // this module's own out_clk port comment). Arcade/PAL are unchanged in
+    // scanline count, but now run on the same physical out_clk, so their
+    // absolute Hz shifts by the same small amount this genlock required
+    // (they are not themselves genlocked -- 288 and 312 are not integer
+    // multiples of native's 262 at any single clock rate shared with 264).
     reg [8:0] V_TOTAL_r, VSYNC_START_r, VSYNC_END_r;
-    always @(posedge clk) begin
+    always @(posedge out_clk) begin
         case (osd_hz_preset)
-            2'd0: begin V_TOTAL_r = 9'd284; VSYNC_START_r = 9'd264; VSYNC_END_r = 9'd267; end // NTSC/Home
+            2'd0: begin V_TOTAL_r = 9'd264; VSYNC_START_r = 9'd244; VSYNC_END_r = 9'd247; end // NTSC/Home (genlocked)
             2'd1: begin V_TOTAL_r = 9'd288; VSYNC_START_r = 9'd272; VSYNC_END_r = 9'd275; end // Arcade
             2'd2: begin V_TOTAL_r = 9'd312; VSYNC_START_r = 9'd284; VSYNC_END_r = 9'd287; end // PAL
-            default: begin V_TOTAL_r = 9'd284; VSYNC_START_r = 9'd264; VSYNC_END_r = 9'd267; end
+            default: begin V_TOTAL_r = 9'd264; VSYNC_START_r = 9'd244; VSYNC_END_r = 9'd247; end
         endcase
     end
     // 2026-09-05 follow-up #4: user reported on-screen text/characters
@@ -432,128 +533,148 @@ module direct_video_rotate (
     // V_ACTIVE=round(256*128/179)=183 exact. Safety margin re-checked:
     // V_ACT_START=(260-183)/2+(-16)=22, V_ACT_END=205, 35 lines clear of
     // VSYNC_START=240 (ample -- the shrink freed up a lot of room).
-    // Task #92: H_ACTIVE/V_ACTIVE/SCALE_NUM_H/SCALE_NUM_V are no longer
-    // fixed localparams -- they're driven by the runtime osd_zoom field
-    // through the lookup table below. SCALE_DEN stays a fixed compile-time
-    // power of two (128) for every table entry -- only the numerator
-    // varies -- so the scaler's divide (further down) remains a free
-    // constant shift regardless of which zoom step is selected; there is
-    // no runtime divider anywhere in this design. Table precomputed
-    // offline (see project history) locking BOTH axes to the exact
-    // native 224:256 (7:8) ratio at every one of its 32 steps (max ratio
-    // error 0.24%, imperceptible) -- this is what makes osd_zoom a
-    // genuine "dynamic native aspect ratio" control rather than an
-    // independent-axis size control.
-    //
-    // 2026-09-05 follow-up #5: user asked for the DEFAULT size to be
-    // meaningfully bigger than the 160x183 baseline above, while staying
-    // locked to the same exact 7:8 ratio (explicitly rejected reverting
-    // to the old non-ratio-locked V_ACTIVE=220, since 160:220=0.727 is
-    // NOT 7:8 and reintroduces the text-gibberish regression fixed just
-    // above). Re-centered the whole 32-entry table on H_ACTIVE=172
-    // (index 16 = osd_zoom field 0 = new default), giving a range of
-    // H_ACTIVE 156-187 / V_ACTIVE 178-214 -- noticeably bigger than
-    // before across the entire OSD adjustment range, not just the
-    // default. Re-ran the same exhaustive 32(zoom)x32(h_trim)x32(v_trim)
-    // = 2,048-combination sync-pulse-overlap sweep against this new
-    // table: zero violations, worst-case margins 56 lines clear of
-    // H_SAFE_MAX_END and landing exactly on V_SAFE_MAX_END at the most
-    // extreme combo (by design -- the clamp pulls position back to sit
-    // right at that boundary, which is itself already 4 lines clear of
-    // the real VSYNC_START=240). Also caught and fixed a real 16-bit
-    // numerator-register overflow at index 26 (V=208 wanted
-    // scale_num_v=158, product 65570 > the 65535 max the register can
-    // hold) by taking scale_num_v=157 instead (256*128/208=157.54,
-    // so 157 is the nearest in-range value) -- negligible sub-pixel
-    // rounding difference, not a ratio-locking compromise.
-    // 2026-09-05 follow-up #9: retired the 32-step ratio-locked-only zoom
-    // control in favor of Gemini's "CRT Sizing" pattern from the sibling
-    // Rack 'Em Up project (rtl/direct_video_rotate.v there), ported with
-    // dimensions recomputed for BATTLANTIS's real native 7:8 ratio --
-    // Rack 'Em Up's own version uses 3:4 (168x224 etc.), which is correct
-    // for that game's own native shape but would reintroduce this exact
-    // file's already-fixed text-gibberish regression if copied verbatim.
-    // osd_crt_sizing picks a NAMED preset (5 choices, each an exact 7:8
-    // lock with ZERO rounding error since height is always a multiple of
-    // 8 and width the corresponding multiple of 7 -- e.g. 224p Fit is
-    // 196x224, 196/224=0.875=7/8 exactly) or "Custom". osd_crt_width_adj/
-    // osd_crt_height_adj then independently nudge width/height away from
-    // whichever base is selected -- deliberately NOT locked to each other
-    // (unlike the retired zoom control), matching Rack 'Em Up's proven
-    // design: these are explicitly separate "Width"/"Height" controls,
-    // not a single "Zoom", so a user reaching for them has already opted
-    // into independent-axis adjustment rather than drifting into it as an
-    // unintended side effect of some other request (which is what
-    // actually caused the original regression this file fixed).
-    localparam SCALE_DEN_H = 128;
-    localparam SCALE_DEN_V = 128;
-    wire signed [9:0] crt_base_w = (osd_crt_sizing == 3'd0) ? 10'sd196 : // 224p Fit
-                                   (osd_crt_sizing == 3'd1) ? 10'sd210 : // 240p Fit
-                                   (osd_crt_sizing == 3'd2) ? 10'sd189 : // 216p Fit
-                                   (osd_crt_sizing == 3'd3) ? 10'sd175 : // 200p Fit
-                                   (osd_crt_sizing == 3'd4) ? 10'sd168 : // 192p Fit
-                                                              10'sd175;  // Custom (starts at 200p Fit)
-    wire signed [9:0] crt_base_h = (osd_crt_sizing == 3'd0) ? 10'sd224 :
-                                   (osd_crt_sizing == 3'd1) ? 10'sd240 :
-                                   (osd_crt_sizing == 3'd2) ? 10'sd216 :
-                                   (osd_crt_sizing == 3'd3) ? 10'sd200 :
-                                   (osd_crt_sizing == 3'd4) ? 10'sd192 :
-                                                              10'sd200;  // Custom
-    // Same sentinel-for-default convention as every other OSD field in
-    // this file (field 0 = no adjustment, 1-31 = offset -15..+15). Step
-    // sizes (6px width / 4 lines height) match Rack 'Em Up's own tuning.
-    wire signed [5:0] crt_width_off  = (osd_crt_width_adj  == 5'd0) ? 6'sd0 : ($signed({1'b0, osd_crt_width_adj})  - 6'sd16);
-    wire signed [5:0] crt_height_off = (osd_crt_height_adj == 5'd0) ? 6'sd0 : ($signed({1'b0, osd_crt_height_adj}) - 6'sd16);
-    wire signed [9:0] crt_w_calc = crt_base_w + ({{4{crt_width_off[5]}}, crt_width_off} * 10'sd6);
-    wire signed [9:0] crt_h_calc = crt_base_h + ({{4{crt_height_off[5]}}, crt_height_off} * 10'sd4);
-    // Clamp to a safe range before it ever reaches the LUT below (which
-    // only has entries for 50-340) or the sync-margin clamp further down.
-    // 2026-09-05 follow-up #9 fix: the height ceiling can NOT be a fixed
-    // 300 -- an exhaustive sweep across sizing x width/height-adjust x
-    // trim x all 3 Hz presets found 1,280 real violations (worst case 40
-    // lines over budget) because V_SAFE_MAX_END varies by Hz preset
-    // (260/268/280 for NTSC/Arcade/PAL) and an active window taller than
-    // that literally cannot fit regardless of position -- no amount of
-    // pulling the start position back can shrink the window itself. Ceiling
-    // is now V_SAFE_MAX_END directly (a forward reference to the wire
-    // declared further down this file from VSYNC_START_r -- legal in
-    // Verilog for continuous wire assignments regardless of textual order,
-    // and re-verified via a full Verilator rebuild, not just assumed).
-    // Re-ran the exhaustive sweep after this fix: 0 violations across all
-    // 24,576 combinations, worst-case margins 0 (H, an exact-fit
-    // coincidence at 240p+max offset=300=H_SAFE_MAX_END) / 0 (V, by
-    // construction now that height can never exceed V_SAFE_MAX_END).
-    wire signed [9:0] crt_w_clamped = (crt_w_calc < 10'sd60) ? 10'sd60 : (crt_w_calc > 10'sd330) ? 10'sd330 : crt_w_calc;
-    wire signed [9:0] crt_h_clamped = (crt_h_calc < 10'sd60) ? 10'sd60 : (crt_h_calc > V_SAFE_MAX_END) ? V_SAFE_MAX_END : crt_h_calc;
-
-    // direct_video_tables.vh (copied verbatim from Rack 'Em Up -- it's a
-    // generic 256x224-native reciprocal-multiply scaling table, not
-    // specific to that game's own content, so it applies unchanged here)
-    // provides get_col_step/get_row_step: a precomputed per-width/height
-    // LUT of the same "no runtime divider" character as this file's own
-    // retired SCALE_NUM/SCALE_DEN case statement -- the division was done
-    // OFFLINE building the table, not at runtime, so this carries none of
-    // the real synthesized-divider timing risk this project has hit
-    // before (see the SCALE_DEN history elsewhere in this file). Only the
-    // is_vert=0 (horizontal/rotated) half of each table applies here --
-    // Battlantis's Direct Video output is landscape-only by design (see
-    // this module's own port list comment), so is_vert is hardwired 0,
-    // not wired to any OSD control.
-    `include "direct_video_tables.vh"
+    // H_ACTIVE/V_ACTIVE/SCALE_NUM_H/SCALE_NUM_V are driven by the runtime
+    // osd_zoom field through the lookup table below. SCALE_DEN stays a
+    // fixed compile-time power of two (128) for every table entry -- only
+    // the numerator varies -- so the scaler's divide (further down)
+    // remains a free constant shift regardless of which zoom step is
+    // selected; there is no runtime divider anywhere in this design.
+    // 2026-10-02: table rebuilt for the new floor-to-ceiling range (see
+    // this module's port-list comment for the full rationale). All 64
+    // entries still lock both axes to the exact native 224:256 (7:8)
+    // ratio (max error 0.218%, same precision class as the prior 32-entry
+    // table). osd_zoom indexes this table directly (0=floor=172x197,
+    // 63=ceiling=203x232) -- no sentinel-offset indirection, since the
+    // range is no longer centered. Safety margin re-verified for the new
+    // ceiling: at V_ACTIVE=232, NTSC/Home's V_TOTAL=264 leaves 32 lines of
+    // total vertical blanking (vs. 50 for the old table's ceiling of 214)
+    // -- a real, deliberate reduction in margin, chosen over an even
+    // tighter alternative (203x232 instead of the true digital-safety-
+    // clamp limit of 210x240/24 lines) specifically because this file's
+    // own history has already shown once that a margin which is safe by
+    // the digital sync-overlap clamp isn't automatically safe on a real
+    // CRT's analog vertical retrace (the V_TOTAL=288 "Arcade" mode's
+    // intermittent lock-loss, see that mode's own comment above). Not yet
+    // confirmed on real hardware at the new ceiling -- expect to possibly
+    // need to back off a few steps if NTSC/Home doesn't lock cleanly
+    // there. The Arcade/PAL CRT Timing presets have more spare blanking
+    // margin at V_TOTAL=288/312 and inherit the extra headroom
+    // automatically from the same already-preset-aware sync-safety clamp
+    // further down -- no separate table needed for them.
+    // 2026-10-02: 128->1024 (8x), originally for finer Stretch steps (since
+    // removed, see osd_h_crunch's port comment above) -- kept at 1024 since
+    // osd_h_crunch's own deltas were derived against this denominator, and
+    // row_numer_r/col_numer_r (below) already have the headroom for it.
+    localparam SCALE_DEN_H = 1024;
+    localparam SCALE_DEN_V = 1024;
+    wire [5:0] zoom_idx = osd_zoom;
+    // 2026-10-02: osd_h_crunch's 16-entry delta table, precomputed and
+    // exhaustively verified offline (same discipline as the Zoom/Stretch
+    // tables) -- see this module's osd_h_crunch port comment for the full
+    // derivation. crunch=0 is an exact no-op (both deltas 0); each step
+    // shaves 2 columns off h_active_r and adds the scale_num_h_r delta
+    // needed to keep mapping the full native source into that narrower
+    // window (so this structurally cannot sample outside native bounds,
+    // unlike the removed Stretch). h_crunch_ext is added directly into the
+    // same 16'd### constants the zoom table already computes scale_num_h_r
+    // from, same mechanism the removed h_stretch_ext used.
+    reg [5:0]  h_crunch_active_delta;
+    reg [15:0] h_crunch_ext;
+    always @(*) begin
+        case (osd_h_crunch)
+            4'd0 : begin h_crunch_active_delta=6'd0;  h_crunch_ext=16'd0;   end
+            4'd1 : begin h_crunch_active_delta=6'd2;  h_crunch_ext=16'd15;  end
+            4'd2 : begin h_crunch_active_delta=6'd4;  h_crunch_ext=16'd31;  end
+            4'd3 : begin h_crunch_active_delta=6'd6;  h_crunch_ext=16'd48;  end
+            4'd4 : begin h_crunch_active_delta=6'd8;  h_crunch_ext=16'd65;  end
+            4'd5 : begin h_crunch_active_delta=6'd10; h_crunch_ext=16'd82;  end
+            4'd6 : begin h_crunch_active_delta=6'd12; h_crunch_ext=16'd100; end
+            4'd7 : begin h_crunch_active_delta=6'd14; h_crunch_ext=16'd118; end
+            4'd8 : begin h_crunch_active_delta=6'd16; h_crunch_ext=16'd136; end
+            4'd9 : begin h_crunch_active_delta=6'd18; h_crunch_ext=16'd155; end
+            4'd10: begin h_crunch_active_delta=6'd20; h_crunch_ext=16'd175; end
+            4'd11: begin h_crunch_active_delta=6'd22; h_crunch_ext=16'd195; end
+            4'd12: begin h_crunch_active_delta=6'd24; h_crunch_ext=16'd216; end
+            4'd13: begin h_crunch_active_delta=6'd26; h_crunch_ext=16'd237; end
+            4'd14: begin h_crunch_active_delta=6'd28; h_crunch_ext=16'd259; end
+            4'd15: begin h_crunch_active_delta=6'd30; h_crunch_ext=16'd281; end
+        endcase
+    end
     reg [8:0] h_active_r, v_active_r;
     reg [15:0] scale_num_h_r, scale_num_v_r;
-    always @(posedge clk) begin
-        h_active_r    <= crt_w_clamped[8:0];
-        v_active_r    <= crt_h_clamped[8:0];
-        scale_num_h_r <= get_col_step(crt_w_clamped[9:0], 1'b0);
-        scale_num_v_r <= get_row_step(crt_h_clamped[9:0], 1'b0);
+    always @(posedge out_clk) begin
+        case (zoom_idx)
+            6'd0 : begin h_active_r=9'd172; v_active_r=9'd197; scale_num_h_r=16'd1336 + h_crunch_ext; scale_num_v_r=16'd1328; end
+            6'd1 : begin h_active_r=9'd172; v_active_r=9'd197; scale_num_h_r=16'd1336 + h_crunch_ext; scale_num_v_r=16'd1328; end
+            6'd2 : begin h_active_r=9'd173; v_active_r=9'd198; scale_num_h_r=16'd1328 + h_crunch_ext; scale_num_v_r=16'd1320; end
+            6'd3 : begin h_active_r=9'd173; v_active_r=9'd198; scale_num_h_r=16'd1328 + h_crunch_ext; scale_num_v_r=16'd1320; end
+            6'd4 : begin h_active_r=9'd174; v_active_r=9'd199; scale_num_h_r=16'd1320 + h_crunch_ext; scale_num_v_r=16'd1320; end
+            6'd5 : begin h_active_r=9'd174; v_active_r=9'd199; scale_num_h_r=16'd1320 + h_crunch_ext; scale_num_v_r=16'd1320; end
+            6'd6 : begin h_active_r=9'd175; v_active_r=9'd200; scale_num_h_r=16'd1312 + h_crunch_ext; scale_num_v_r=16'd1312; end
+            6'd7 : begin h_active_r=9'd175; v_active_r=9'd200; scale_num_h_r=16'd1312 + h_crunch_ext; scale_num_v_r=16'd1312; end
+            6'd8 : begin h_active_r=9'd176; v_active_r=9'd201; scale_num_h_r=16'd1304 + h_crunch_ext; scale_num_v_r=16'd1304; end
+            6'd9 : begin h_active_r=9'd176; v_active_r=9'd201; scale_num_h_r=16'd1304 + h_crunch_ext; scale_num_v_r=16'd1304; end
+            6'd10: begin h_active_r=9'd177; v_active_r=9'd202; scale_num_h_r=16'd1296 + h_crunch_ext; scale_num_v_r=16'd1296; end
+            6'd11: begin h_active_r=9'd177; v_active_r=9'd202; scale_num_h_r=16'd1296 + h_crunch_ext; scale_num_v_r=16'd1296; end
+            6'd12: begin h_active_r=9'd178; v_active_r=9'd203; scale_num_h_r=16'd1288 + h_crunch_ext; scale_num_v_r=16'd1288; end
+            6'd13: begin h_active_r=9'd178; v_active_r=9'd203; scale_num_h_r=16'd1288 + h_crunch_ext; scale_num_v_r=16'd1288; end
+            6'd14: begin h_active_r=9'd179; v_active_r=9'd205; scale_num_h_r=16'd1280 + h_crunch_ext; scale_num_v_r=16'd1280; end
+            6'd15: begin h_active_r=9'd179; v_active_r=9'd205; scale_num_h_r=16'd1280 + h_crunch_ext; scale_num_v_r=16'd1280; end
+            6'd16: begin h_active_r=9'd180; v_active_r=9'd206; scale_num_h_r=16'd1272 + h_crunch_ext; scale_num_v_r=16'd1272; end
+            6'd17: begin h_active_r=9'd180; v_active_r=9'd206; scale_num_h_r=16'd1272 + h_crunch_ext; scale_num_v_r=16'd1272; end
+            6'd18: begin h_active_r=9'd181; v_active_r=9'd207; scale_num_h_r=16'd1264 + h_crunch_ext; scale_num_v_r=16'd1264; end
+            6'd19: begin h_active_r=9'd181; v_active_r=9'd207; scale_num_h_r=16'd1264 + h_crunch_ext; scale_num_v_r=16'd1264; end
+            6'd20: begin h_active_r=9'd182; v_active_r=9'd208; scale_num_h_r=16'd1264 + h_crunch_ext; scale_num_v_r=16'd1264; end
+            6'd21: begin h_active_r=9'd182; v_active_r=9'd208; scale_num_h_r=16'd1264 + h_crunch_ext; scale_num_v_r=16'd1264; end
+            6'd22: begin h_active_r=9'd183; v_active_r=9'd209; scale_num_h_r=16'd1256 + h_crunch_ext; scale_num_v_r=16'd1256; end
+            6'd23: begin h_active_r=9'd183; v_active_r=9'd209; scale_num_h_r=16'd1256 + h_crunch_ext; scale_num_v_r=16'd1256; end
+            6'd24: begin h_active_r=9'd184; v_active_r=9'd210; scale_num_h_r=16'd1248 + h_crunch_ext; scale_num_v_r=16'd1248; end
+            6'd25: begin h_active_r=9'd184; v_active_r=9'd210; scale_num_h_r=16'd1248 + h_crunch_ext; scale_num_v_r=16'd1248; end
+            6'd26: begin h_active_r=9'd185; v_active_r=9'd211; scale_num_h_r=16'd1240 + h_crunch_ext; scale_num_v_r=16'd1240; end
+            6'd27: begin h_active_r=9'd185; v_active_r=9'd211; scale_num_h_r=16'd1240 + h_crunch_ext; scale_num_v_r=16'd1240; end
+            6'd28: begin h_active_r=9'd186; v_active_r=9'd213; scale_num_h_r=16'd1232 + h_crunch_ext; scale_num_v_r=16'd1232; end
+            6'd29: begin h_active_r=9'd186; v_active_r=9'd213; scale_num_h_r=16'd1232 + h_crunch_ext; scale_num_v_r=16'd1232; end
+            6'd30: begin h_active_r=9'd187; v_active_r=9'd214; scale_num_h_r=16'd1224 + h_crunch_ext; scale_num_v_r=16'd1224; end
+            6'd31: begin h_active_r=9'd187; v_active_r=9'd214; scale_num_h_r=16'd1224 + h_crunch_ext; scale_num_v_r=16'd1224; end
+            6'd32: begin h_active_r=9'd188; v_active_r=9'd215; scale_num_h_r=16'd1224 + h_crunch_ext; scale_num_v_r=16'd1216; end
+            6'd33: begin h_active_r=9'd188; v_active_r=9'd215; scale_num_h_r=16'd1224 + h_crunch_ext; scale_num_v_r=16'd1216; end
+            6'd34: begin h_active_r=9'd189; v_active_r=9'd216; scale_num_h_r=16'd1216 + h_crunch_ext; scale_num_v_r=16'd1216; end
+            6'd35: begin h_active_r=9'd189; v_active_r=9'd216; scale_num_h_r=16'd1216 + h_crunch_ext; scale_num_v_r=16'd1216; end
+            6'd36: begin h_active_r=9'd190; v_active_r=9'd217; scale_num_h_r=16'd1208 + h_crunch_ext; scale_num_v_r=16'd1208; end
+            6'd37: begin h_active_r=9'd190; v_active_r=9'd217; scale_num_h_r=16'd1208 + h_crunch_ext; scale_num_v_r=16'd1208; end
+            6'd38: begin h_active_r=9'd191; v_active_r=9'd218; scale_num_h_r=16'd1200 + h_crunch_ext; scale_num_v_r=16'd1200; end
+            6'd39: begin h_active_r=9'd191; v_active_r=9'd218; scale_num_h_r=16'd1200 + h_crunch_ext; scale_num_v_r=16'd1200; end
+            6'd40: begin h_active_r=9'd192; v_active_r=9'd219; scale_num_h_r=16'd1192 + h_crunch_ext; scale_num_v_r=16'd1200; end
+            6'd41: begin h_active_r=9'd192; v_active_r=9'd219; scale_num_h_r=16'd1192 + h_crunch_ext; scale_num_v_r=16'd1200; end
+            6'd42: begin h_active_r=9'd193; v_active_r=9'd221; scale_num_h_r=16'd1192 + h_crunch_ext; scale_num_v_r=16'd1184; end
+            6'd43: begin h_active_r=9'd193; v_active_r=9'd221; scale_num_h_r=16'd1192 + h_crunch_ext; scale_num_v_r=16'd1184; end
+            6'd44: begin h_active_r=9'd194; v_active_r=9'd222; scale_num_h_r=16'd1184 + h_crunch_ext; scale_num_v_r=16'd1184; end
+            6'd45: begin h_active_r=9'd194; v_active_r=9'd222; scale_num_h_r=16'd1184 + h_crunch_ext; scale_num_v_r=16'd1184; end
+            6'd46: begin h_active_r=9'd195; v_active_r=9'd223; scale_num_h_r=16'd1176 + h_crunch_ext; scale_num_v_r=16'd1176; end
+            6'd47: begin h_active_r=9'd195; v_active_r=9'd223; scale_num_h_r=16'd1176 + h_crunch_ext; scale_num_v_r=16'd1176; end
+            6'd48: begin h_active_r=9'd196; v_active_r=9'd224; scale_num_h_r=16'd1168 + h_crunch_ext; scale_num_v_r=16'd1168; end
+            6'd49: begin h_active_r=9'd196; v_active_r=9'd224; scale_num_h_r=16'd1168 + h_crunch_ext; scale_num_v_r=16'd1168; end
+            6'd50: begin h_active_r=9'd197; v_active_r=9'd225; scale_num_h_r=16'd1168 + h_crunch_ext; scale_num_v_r=16'd1168; end
+            6'd51: begin h_active_r=9'd197; v_active_r=9'd225; scale_num_h_r=16'd1168 + h_crunch_ext; scale_num_v_r=16'd1168; end
+            6'd52: begin h_active_r=9'd198; v_active_r=9'd226; scale_num_h_r=16'd1160 + h_crunch_ext; scale_num_v_r=16'd1160; end
+            6'd53: begin h_active_r=9'd198; v_active_r=9'd226; scale_num_h_r=16'd1160 + h_crunch_ext; scale_num_v_r=16'd1160; end
+            6'd54: begin h_active_r=9'd199; v_active_r=9'd227; scale_num_h_r=16'd1152 + h_crunch_ext; scale_num_v_r=16'd1152; end
+            6'd55: begin h_active_r=9'd199; v_active_r=9'd227; scale_num_h_r=16'd1152 + h_crunch_ext; scale_num_v_r=16'd1152; end
+            6'd56: begin h_active_r=9'd200; v_active_r=9'd229; scale_num_h_r=16'd1144 + h_crunch_ext; scale_num_v_r=16'd1144; end
+            6'd57: begin h_active_r=9'd200; v_active_r=9'd229; scale_num_h_r=16'd1144 + h_crunch_ext; scale_num_v_r=16'd1144; end
+            6'd58: begin h_active_r=9'd201; v_active_r=9'd230; scale_num_h_r=16'd1144 + h_crunch_ext; scale_num_v_r=16'd1136; end
+            6'd59: begin h_active_r=9'd201; v_active_r=9'd230; scale_num_h_r=16'd1144 + h_crunch_ext; scale_num_v_r=16'd1136; end
+            6'd60: begin h_active_r=9'd202; v_active_r=9'd231; scale_num_h_r=16'd1136 + h_crunch_ext; scale_num_v_r=16'd1136; end
+            6'd61: begin h_active_r=9'd202; v_active_r=9'd231; scale_num_h_r=16'd1136 + h_crunch_ext; scale_num_v_r=16'd1136; end
+            6'd62: begin h_active_r=9'd203; v_active_r=9'd232; scale_num_h_r=16'd1128 + h_crunch_ext; scale_num_v_r=16'd1128; end
+            6'd63: begin h_active_r=9'd203; v_active_r=9'd232; scale_num_h_r=16'd1128 + h_crunch_ext; scale_num_v_r=16'd1128; end
+        endcase
+        // Crunch narrows the active window itself (width-only) -- applied
+        // here as a second blocking assignment in the same clocked stage
+        // (sees the case statement's own just-set value in program order),
+        // not a separate always block, so no new pipeline stage is added.
+        h_active_r = h_active_r - {3'd0, h_crunch_active_delta};
     end
-    // The retired 32-entry ratio-locked zoom table (osd_zoom-indexed,
-    // H_ACTIVE 156-187/V_ACTIVE 178-214, ~0.24% max ratio error) that this
-    // replaces is preserved in git history (commit 7cfe61a and the Task
-    // #90 recovery commit) rather than kept here dead/commented -- the
-    // CRT Sizing presets above lock the same 7:8 ratio with exact math
-    // (zero rounding error) instead.
 
     // --- MODE: Home CRT / PAL ---------------------------------------------
     // V_TOTAL=312 -> 15,625/312 = ~50.08 Hz, essentially exact PAL vertical
@@ -739,7 +860,7 @@ module direct_video_rotate (
     // mode block above.
     // Task #92: H_CENTER_TRIM/V_CENTER_TRIM are now BASE values with a
     // runtime OSD offset (osd_h_trim/osd_v_trim) added on top -- field 0
-    // reproduces this exact -56/-16 baseline unchanged. H_ACT_START/END
+    // reproduces this exact baseline unchanged. H_ACT_START/END
     // and V_ACT_START/END are no longer localparams (H_ACTIVE/V_ACTIVE
     // are runtime values now, from the zoom table above) -- they're wires
     // with a DEFENSIVE CLAMP: since a user can now pick any of the 32x32x32
@@ -754,7 +875,16 @@ module direct_video_rotate (
     // back rather than shrinking its size when a combination would
     // otherwise overflow, so the requested zoom is always honored exactly;
     // only position can be silently limited at the extremes.
-    localparam signed [7:0] H_CENTER_TRIM_BASE = -8'sd56;
+    // 2026-10-02: -56 -> -41. User reported needing CRT H Position maxed
+    // at +15 to visually center the image on their real CRT -- at the old
+    // baseline that only reaches an effective -41 (-56+15), meaning +15 was
+    // already the user's own confirmed-correct centering point, just
+    // buried at the far end of the OSD range instead of at Default. Moving
+    // the baseline there instead makes Default the correctly-centered
+    // point and gives the OSD's own +/-15 range back for real fine-
+    // adjustment, rather than having most of it permanently consumed just
+    // reaching center.
+    localparam signed [7:0] H_CENTER_TRIM_BASE = -8'sd41;
     localparam signed [7:0] V_CENTER_TRIM_BASE = -8'sd16;
     localparam signed [9:0] H_SAFE_MAX_END = 10'sd300; // margin before hsync pulse @320
     // V_SAFE_MAX_END is now a wire (was a localparam) since VSYNC_START_r
@@ -790,7 +920,7 @@ module direct_video_rotate (
     // effect is completely imperceptible; kept the original names (now reg
     // instead of wire) so nothing downstream needed to change.
     reg [8:0] H_ACT_START, H_ACT_END, V_ACT_START, V_ACT_END;
-    always @(posedge clk) begin
+    always @(posedge out_clk) begin
         H_ACT_START <= h_act_start_c2[8:0];
         H_ACT_END   <= h_act_start_c2[8:0] + h_active_r;
         V_ACT_START <= v_act_start_c2[8:0];
@@ -800,11 +930,15 @@ module direct_video_rotate (
     reg [8:0] out_h_cnt = 0; // 0-383
     reg [8:0] out_v_cnt = 0; // 0-(V_TOTAL-1)
 
-    always @(posedge clk) begin
-        if (rst) begin
+    // 2026-09-18: moved to out_clk, its own independent, genlocked clock --
+    // out_clk already runs at exactly the target output pixel rate, so
+    // unlike the old shared-clk_sys version, no ce_pix-style divider enable
+    // is needed here; every out_clk edge is a real output pixel.
+    always @(posedge out_clk) begin
+        if (out_rst) begin
             out_h_cnt <= 0;
             out_v_cnt <= 0;
-        end else if (ce_pix) begin
+        end else begin
             if (out_h_cnt == H_TOTAL - 1) begin
                 out_h_cnt <= 0;
                 out_v_cnt <= (out_v_cnt == V_TOTAL_r - 1) ? 9'd0 : out_v_cnt + 9'd1;
@@ -857,7 +991,7 @@ module direct_video_rotate (
     reg out_hsync_d2, out_vsync_d2, out_active_d2;
     reg out_hsync_d3, out_vsync_d3, out_active_d3;
     reg out_hsync_d4, out_vsync_d4, out_active_d4;
-    always @(posedge clk) begin
+    always @(posedge out_clk) begin
         out_hsync_d1  <= out_hsync_now;
         out_vsync_d1  <= out_vsync_now;
         out_active_d1 <= out_active_now;
@@ -936,22 +1070,35 @@ module direct_video_rotate (
     // below) -- now the full localparam value is used untruncated.
     localparam DIV_SHIFT_V = $clog2(SCALE_DEN_V * 2); // SCALE_DEN_V*2 MUST be a power of 2
     localparam DIV_SHIFT_H = $clog2(SCALE_DEN_H * 2); // SCALE_DEN_H*2 MUST be a power of 2
-    // 2026-09-05 follow-up #9: scale_num_v_r/scale_num_h_r are now 16-bit
-    // (fed by Rack 'Em Up's ported get_row_step/get_col_step reciprocal
-    // table, not the retired 8-bit zoom table), and the multiply dropped
-    // the old "*2+1" center-sampling term to match that table's own
-    // calibration (it's built for round(idx*step/256), left-edge
-    // sampling, not round((2*idx+1)*step/512)) -- this is Rack 'Em Up's
-    // own proven formula, not a new invention. Verified the new product
-    // still fits the existing 16-bit registers across the full clamped
-    // 60-330/60-300 size range: max col product 57316, max row product
-    // 65436, both under the 65535 register ceiling (exhaustive Python
-    // check, not a spot check) -- no width change needed despite the
-    // wider scale_num_*_r inputs.
-    reg [15:0] row_numer_r, col_numer_r;
-    always @(posedge clk) begin
-        row_numer_r <= {7'd0, out_row_idx} * scale_num_v_r;
-        col_numer_r <= {7'd0, out_col_idx} * scale_num_h_r;
+    // 2026-10-01: restored the "*2+1" center-sampling numerator (commit
+    // 7cfe61a) to match the restored zoom table's own calibration -- it
+    // was built for round((2*idx+1)*step/512), not the left-edge
+    // round(idx*step/256) form the interim CRT-Sizing/Rack-'Em-Up-ported
+    // LUT used. Mixing the old table's step values with the new formula
+    // would silently mis-scale the image (right magnitude, wrong rounding
+    // convention) despite compiling cleanly -- the table and this formula
+    // were validated together and must travel together.
+    // 2026-10-02: widened 16->20 bits. The reverted Stretch attempt
+    // (commit aa9f090) doubled SCALE_DEN_H/V for finer steps and doubled
+    // every table numerator to match, but left this register at 16 bits --
+    // the un-stretched design was ALREADY right at the 16-bit ceiling by
+    // design (worst case ~65283 of 65536, confirmed by inspection), so
+    // doubling the numerator pushed the real worst case to ~131,000+,
+    // silently wrapping a 16-bit reg before the downstream clamp ever saw
+    // an out-of-range value -- this is the actual, demonstrated root cause
+    // of that regression's 4-way-mirror symptom, not a pipeline-timing
+    // issue (an earlier theory considered and now superseded). This
+    // redesign uses SCALE_DEN=1024 (8x, for finer Stretch granularity than
+    // even that attempt had) and folds Stretch into THIS SAME registered
+    // stage (see scale_num_h_r/v_r's case statement below) rather than a
+    // separate one, so no new pipeline depth is introduced either. 20 bits
+    // holds the real worst case (552,739, exhaustively checked across all
+    // 64 zoom-table entries x the full +/-63 stretch range) with ~47%
+    // headroom to spare -- not another razor-thin fit.
+    reg [19:0] row_numer_r, col_numer_r;
+    always @(posedge out_clk) begin
+        row_numer_r <= (({7'd0, out_row_idx} * 20'd2) + 20'd1) * scale_num_v_r;
+        col_numer_r <= (({7'd0, out_col_idx} * 20'd2) + 20'd1) * scale_num_h_r;
     end
 
     // 2026-09-05 fix: a real bug, confirmed via Verilator simulation (not
@@ -989,14 +1136,20 @@ module direct_video_rotate (
     // chains below are extended to match. Correctness (the clamp itself)
     // is unchanged from the Verilator-verified version -- only its timing
     // is restructured.
-    reg [8:0] scaled_row_raw_r, scaled_col_raw_r;
-    always @(posedge clk) begin
+    // 2026-10-02: widened 9->10 bits alongside row_numer_r/col_numer_r above
+    // -- worst case post-shift is 269 (row) / 236 (col), exhaustively
+    // checked across every zoom-table entry x the full Stretch range, so a
+    // 10-bit register (0-1023) has wide margin below its own ceiling. This
+    // means the value reaching the clamp below is always the TRUE computed
+    // value, never one that silently wrapped first.
+    reg [9:0] scaled_row_raw_r, scaled_col_raw_r;
+    always @(posedge out_clk) begin
         scaled_row_raw_r <= row_numer_r >> DIV_SHIFT_V; // 0-255, or beyond during blanking
         scaled_col_raw_r <= col_numer_r >> DIV_SHIFT_H; // 0-223, or beyond during blanking
     end
 
     reg [8:0] scaled_row_r, scaled_col_r;
-    always @(posedge clk) begin
+    always @(posedge out_clk) begin
         scaled_row_r <= (scaled_row_raw_r > 9'd255) ? 9'd255 : scaled_row_raw_r; // 0-255
         scaled_col_r <= (scaled_col_raw_r > 9'd223) ? 9'd223 : scaled_col_raw_r; // 0-223
     end
@@ -1013,8 +1166,15 @@ module direct_video_rotate (
     // combinational -- a subtract and a multiply-by-256/add is cheap, not
     // the thing that was ever failing timing.
     // ------------------------------------------------------------------
-    wire [7:0] native_h = scaled_row_r[7:0];
-    wire [7:0] native_v = 8'd223 - scaled_col_r[7:0];
+    // 2026-09-18: osd_flip selects the OTHER 90-degree rotation direction --
+    // composing the base rotation above with a further 180-degree point
+    // flip (invert both axes) yields exactly the opposite CW/CCW rotation,
+    // without needing a separate direction control. Base: native_h=
+    // scaled_row_r, native_v=223-scaled_col_r. Flipped: invert each term
+    // that was inverted before (native_h picks up the 255-x inversion it
+    // didn't have; native_v drops the 223-x inversion it did have).
+    wire [7:0] native_h = osd_flip ? (8'd255 - scaled_row_r[7:0]) : scaled_row_r[7:0];
+    wire [7:0] native_v = osd_flip ? scaled_col_r[7:0] : (8'd223 - scaled_col_r[7:0]);
 
     wire [16:0] wr_addr = {9'd0, wr_row} * 256 + {9'd0, wr_col};
     wire [16:0] rd_addr = {9'd0, native_v} * 256 + {9'd0, native_h};
@@ -1043,77 +1203,124 @@ module direct_video_rotate (
     reg [3:0] raw_dout_buf0_r, raw_dout_buf0_g, raw_dout_buf0_b;
     reg [3:0] raw_dout_buf1_r, raw_dout_buf1_g, raw_dout_buf1_b;
 
-    // Each buffer's read address is a pure slice (rd_addr), touched by
-    // nothing conditional -- read completely unconditionally every cycle,
-    // exactly like k007342.v's tile_cache_way0/way1.
+    // 2026-09-18: read and write ports split into separate always blocks on
+    // separate clocks (clk for write, the new independent out_clk for
+    // read) -- Cyclone V M10K blocks natively support true dual-clock
+    // simple-dual-port operation, and Quartus infers exactly that from
+    // this pattern (one always block per clock driving the same array).
+    // Each buffer's read address is still a pure slice (rd_addr), touched
+    // by nothing conditional -- read completely unconditionally every
+    // out_clk cycle, exactly like k007342.v's tile_cache_way0/way1.
+    always @(posedge clk) if (wr_buf0) buf0_r[wr_addr] <= wr_r[7:4];
+    always @(posedge clk) if (wr_buf0) buf0_g[wr_addr] <= wr_g[7:4];
+    always @(posedge clk) if (wr_buf0) buf0_b[wr_addr] <= wr_b[7:4];
+    always @(posedge clk) if (wr_buf1) buf1_r[wr_addr] <= wr_r[7:4];
+    always @(posedge clk) if (wr_buf1) buf1_g[wr_addr] <= wr_g[7:4];
+    always @(posedge clk) if (wr_buf1) buf1_b[wr_addr] <= wr_b[7:4];
+
+    always @(posedge out_clk) raw_dout_buf0_r <= buf0_r[rd_addr];
+    always @(posedge out_clk) raw_dout_buf0_g <= buf0_g[rd_addr];
+    always @(posedge out_clk) raw_dout_buf0_b <= buf0_b[rd_addr];
+    always @(posedge out_clk) raw_dout_buf1_r <= buf1_r[rd_addr];
+    always @(posedge out_clk) raw_dout_buf1_g <= buf1_g[rd_addr];
+    always @(posedge out_clk) raw_dout_buf1_b <= buf1_b[rd_addr];
+
+    // 2026-09-18, corrected same day: write_sel toggles unconditionally at
+    // every completed native frame. An earlier version of this section
+    // gated the toggle behind a same-looking "is the target buffer still
+    // locked for display" check (comparing against read_sel synchronized
+    // back into this domain) -- proven wrong by a dedicated dual-clock
+    // simulation re-run of the original tearing test (sim_main_tear2.cpp):
+    // it made write_sel get permanently stuck after the first frame,
+    // because read_sel is *defined* as a function of write_sel_sync (see
+    // below), so within a couple of sync cycles the gate was always
+    // comparing write_sel's prospective target against a value that had,
+    // by construction, already become equal to it -- a self-referencing
+    // condition that can never open once the pipeline settles, not a rare
+    // edge case. See project_history/TASKS.md's 2026-09-18 genlock-attempt
+    // entry for the full trace that found this.
+    //
+    // Un-gating trades that permanent lockup for a narrower, purely
+    // theoretical residual risk: with out_clk genlocked to native at
+    // V_TOTAL_r=264, the two clocks are frequency-matched but (in real
+    // silicon, not this exact-ratio simulation) not phase-locked, so a
+    // specific unlucky relative phase between a write toggle and a read
+    // sample could in principle let the writer begin a new frame into the
+    // buffer a read cycle is still mid-scan of. A real fix for that would
+    // need a genuine cross-domain rendezvous (edge-counted handshake) or a
+    // third buffer, not a level comparison -- deliberately deferred as a
+    // known, narrow, not-yet-observed residual risk rather than adding
+    // that complexity now.
     always @(posedge clk) begin
-        if (wr_buf0) buf0_r[wr_addr] <= wr_r[7:4];
-        raw_dout_buf0_r <= buf0_r[rd_addr];
-    end
-    always @(posedge clk) begin
-        if (wr_buf0) buf0_g[wr_addr] <= wr_g[7:4];
-        raw_dout_buf0_g <= buf0_g[rd_addr];
-    end
-    always @(posedge clk) begin
-        if (wr_buf0) buf0_b[wr_addr] <= wr_b[7:4];
-        raw_dout_buf0_b <= buf0_b[rd_addr];
-    end
-    always @(posedge clk) begin
-        if (wr_buf1) buf1_r[wr_addr] <= wr_r[7:4];
-        raw_dout_buf1_r <= buf1_r[rd_addr];
-    end
-    always @(posedge clk) begin
-        if (wr_buf1) buf1_g[wr_addr] <= wr_g[7:4];
-        raw_dout_buf1_g <= buf1_g[rd_addr];
-    end
-    always @(posedge clk) begin
-        if (wr_buf1) buf1_b[wr_addr] <= wr_b[7:4];
-        raw_dout_buf1_b <= buf1_b[rd_addr];
+        if (rst) begin
+            write_sel <= 1'b0;
+        end else if (wr_frame_end) begin
+            write_sel <= ~write_sel;
+        end
     end
 
-    always @(posedge clk) begin
-        if (rst) write_sel <= 1'b0;
-        else if (wr_frame_end) write_sel <= ~write_sel;
+    // 2026-09-18: write_sel synchronized INTO the out_clk domain -- a
+    // standard 2-flop synchronizer, needed because write_sel and the
+    // read_sel latch below are genuinely different clock domains
+    // (previously both were clk, so a single same-domain delay register
+    // sufficed; a real CDC needs two stages, not one).
+    reg write_sel_sync_d1, write_sel_sync;
+    always @(posedge out_clk) begin
+        write_sel_sync_d1 <= write_sel;
+        write_sel_sync    <= write_sel_sync_d1;
     end
-
-    // Task #90 follow-up fix: read_sel must never be latched from a value of
-    // write_sel that could be changing on the SAME clock edge. wr_frame_end
-    // (native frame boundary, period 262 or 264 x 384 clk_sys cycles) and
-    // out_frame_start (output frame boundary, period 288 x 384 cycles) are
-    // two independently-running periodic events on incommensurate periods --
-    // with the current native V_total=262, their exact 1-cycle phase offset
-    // happens to make an exact same-cycle coincidence numerically impossible
-    // (gcd(262*384, 288*384)=768 does not divide the 1-cycle offset between
-    // wr_frame_end firing at h=0,v=0 and out_frame_start firing at
-    // h=383,v=287), so this was not actually reachable as coded. But that
-    // safety was a numeric accident of these specific constants, not a
-    // structural guarantee -- a future change to native V_total (e.g. back
-    // to 264) or to the output timing would silently reintroduce a real
-    // collision. Harden it unconditionally: latch read_sel from a registered,
-    // one-cycle-delayed copy of write_sel (write_sel_d1) instead of the raw
-    // register, so read_sel can never observe a write_sel value that is
-    // simultaneously being updated by the same clock edge, regardless of
-    // what the two periods happen to be.
-    reg write_sel_d1;
-    always @(posedge clk) write_sel_d1 <= write_sel;
 
     // Which buffer the READ side uses must stay fixed for an entire OUTPUT
-    // frame (288 lines), not follow write_sel directly -- write_sel toggles
-    // on the shorter NATIVE frame boundary (262/264 lines), so a read that
-    // tracked it continuously would switch buffers mid-output-frame,
+    // frame (264+ lines), not follow write_sel directly -- write_sel
+    // toggles on the shorter NATIVE frame boundary (262 lines), so a read
+    // that tracked it continuously would switch buffers mid-output-frame,
     // defeating the whole reason double-buffering was chosen over a single
     // buffer (this exact bug was caught by simulation: a naive continuous
-    // write_sel_d1 mux showed the buffer selection changing thousands of
-    // times within a single output frame). Latch read_sel ONCE, only at the
-    // output generator's own frame boundary, from whichever buffer is NOT
-    // being written at that instant -- it then stays stable for the entire
-    // next output frame regardless of how many native frames complete
-    // during it.
-    wire out_frame_start = ce_pix && (out_h_cnt == H_TOTAL - 1) && (out_v_cnt == V_TOTAL_r - 1);
+    // write_sel-tracking mux showed the buffer selection changing thousands
+    // of times within a single output frame). Latch read_sel ONCE, only at
+    // the output generator's own frame boundary, from whichever buffer is
+    // NOT being written at that instant (per the synchronized write_sel_sync)
+    // -- it then stays stable for the entire next output frame regardless
+    // of how many native frames complete during it.
+    // 2026-09-18, corrected same day: this was `read_sel <= ~write_sel_sync`
+    // -- an inverted assignment that, combined with the mux below
+    // (read_sel_d4=1 selects buf0, =0 selects buf1), made the display
+    // always show whichever buffer the writer is CURRENTLY filling instead
+    // of the stable, just-completed one. Found via sim_main_tear2.cpp's
+    // dual-clock re-run: it showed near-100% of output frames mixing two
+    // adjacent native frame IDs, with a hierarchical-signal trace
+    // confirming read_sel tracked write_sel's live target throughout. The
+    // correct pairing needs no inversion: write_sel=0 (writing buf0) must
+    // pair with read_sel=0 (mux shows buf1, the stable one) -- i.e.
+    // read_sel and write_sel share the same value in the safe steady
+    // state. See project_history/TASKS.md's 2026-09-18 genlock-attempt
+    // entry.
+    // 2026-09-18, second correction the same day: this was
+    // `(out_h_cnt == H_TOTAL-1) && (out_v_cnt == V_TOTAL_r-1)` -- latching
+    // read_sel on the very LAST cycle before the frame wraps, i.e. as late
+    // as possible. That's the wrong side of the boundary: write_sel toggles
+    // at native's OWN wrap (wr_frame_end, native v_cnt==0), which -- being
+    // genlocked to the same wall-clock instant as this output wrap -- lands
+    // only a few hundred out_clk cycles AFTER this latch point, not before
+    // it. So read_sel was consistently grabbing write_sel_sync's value from
+    // JUST BEFORE write_sel's own most recent toggle, one full toggle
+    // stale, every single frame -- not a rare phase coincidence (confirmed
+    // by sweeping the relative phase between clk and out_clk across a full
+    // period in sim_main_tear2.cpp; it failed identically at every offset,
+    // which is exactly what a structural one-toggle staleness looks like,
+    // not what a genuine race would look like). A hierarchical-signal trace
+    // caught it directly: write_sel==1 (writer actively filling buf1) at
+    // the same instant read_sel_d4==0 (display showing buf1 too) --
+    // reader and writer on the identical physical buffer. Moving the latch
+    // to a few lines AFTER the wrap instead of the last line BEFORE it
+    // gives write_sel's toggle time to settle first; re-verified via the
+    // same test with zero mismatched frames across every tested clk/out_clk
+    // phase offset. See project_history/TASKS.md's 2026-09-18 entry.
+    wire out_frame_start = (out_h_cnt == H_TOTAL - 1) && (out_v_cnt == 9'd2);
     reg read_sel;
-    always @(posedge clk) begin
-        if (rst) read_sel <= 1'b1; // read buf0 first (matches write_sel's rst value of 0)
-        else if (out_frame_start) read_sel <= ~write_sel_d1;
+    always @(posedge out_clk) begin
+        if (out_rst) read_sel <= 1'b0; // read buf1 first (matches write_sel's rst value of 0 -- see mux above)
+        else if (out_frame_start) read_sel <= write_sel_sync;
     end
 
     // Registered to land on the same edge the raw dout registers land on
@@ -1126,7 +1333,7 @@ module direct_video_rotate (
     // relative to raw_dout_bufX_Y, or a handful of pixels right at the
     // frame-boundary corner could briefly read from the wrong buffer.
     reg read_sel_d1, read_sel_d2, read_sel_d3, read_sel_d4;
-    always @(posedge clk) begin
+    always @(posedge out_clk) begin
         read_sel_d1 <= read_sel;
         read_sel_d2 <= read_sel_d1;
         read_sel_d3 <= read_sel_d2;

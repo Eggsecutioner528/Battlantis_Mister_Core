@@ -1402,7 +1402,29 @@ scanlines #(0) VGA_scanlines
 
 wire [23:0] vga_data_osd;
 wire        vga_vs_osd, vga_hs_osd, vga_de_osd;
-osd vga_osd
+osd #(
+	// 2026-09-25, Battlantis: every CRT Timing preset (264/288/312-line) is
+	// below the stock 320-line threshold, so this path's OSD was always
+	// pinned to the smallest tier regardless of which CRT option was
+	// selected. 250 sits below all three, routing this path's native
+	// resolution into the next tier up uniformly (see osd.v's own
+	// OSD_THRESH0 comment for the full explanation). hdmi_osd keeps the
+	// stock default -- its already-scaled output doesn't need this.
+	//
+	// 2026-10-02: that fix alone never actually took effect for this rotated
+	// display -- confirmed "still squished" live on real hardware. See
+	// osd.v's own OSD_THRESH1/2/3 comment for why (the `rot[0] & v_cnt_2`
+	// OR-term bypasses OSD_THRESH0 entirely whenever rotated). 260 sits
+	// just below every CRT Timing preset's V_TOTAL (264/288/312), so all
+	// three now also miss v_cnt_2/_3/_4, landing on multiscan=3 -- the
+	// largest tier actually reachable by a rotated display. (Re-applied
+	// from commit aa9f090, reverted entirely for an unrelated Stretch
+	// regression this piece had nothing to do with.)
+	.OSD_THRESH0(12'd250),
+	.OSD_THRESH1(12'd260),
+	.OSD_THRESH2(12'd260),
+	.OSD_THRESH3(12'd260)
+) vga_osd
 (
 	.clk_sys(clk_sys),
 

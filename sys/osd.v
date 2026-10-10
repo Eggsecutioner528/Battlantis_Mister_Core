@@ -23,6 +23,42 @@ module osd
 
 parameter  OSD_COLOR    =  3'd4;
 
+// 2026-09-25, Battlantis: the multiscan size-tier check below compares the
+// frame's total line count against these thresholds -- every CRT Timing
+// preset this core offers (264/288/312-line NTSC/Arcade/PAL) is always
+// under the stock 320 threshold, so the CRT/Direct Video output always
+// lands in the smallest OSD tier no matter which CRT option is picked
+// (the actual root cause of "OSD size depends on CRT settings" -- it does
+// not vary WITH the settings, it's just always pinned to the floor).
+// Parameterized so sys_top.v's vga_osd instance (the CRT/Direct Video
+// path) can pass a lower threshold here, routing its genuinely low native
+// resolution into the next tier up (2x larger) through this exact same,
+// otherwise-untouched comparison chain -- hdmi_osd keeps the stock 320
+// default, since HDMI's own scaled output is already comfortably above it.
+parameter  OSD_THRESH0  =  12'd320;
+
+// 2026-10-02, Battlantis: the OSD_THRESH0 override above does NOT actually
+// reach a bigger multiscan tier for a ROTATED display (see the tier-select
+// chain below) -- `v_cnt_1 | (rot[0] & v_cnt_2)` ORs in `rot[0] & v_cnt_2`
+// unconditionally whenever rotated, and v_cnt_2's own threshold (640) is far
+// above any of this core's real V_TOTAL values (264/288/312), so that term
+// is always true and pins a rotated Direct Video output at the smallest
+// (multiscan=0) tier regardless of OSD_THRESH0 -- one raw scanline per OSD
+// character row, stretched across this core's full OSD_WIDTH horizontally:
+// exactly a "squished" (vertically compressed) OSD, confirmed live on real
+// hardware. The chain's final, biggest tier (multiscan=4) is structurally
+// unreachable for any rotated core (`rot[0] | v_cnt_4` is always true once
+// rot[0]=1, short-circuiting before the last `else`), so multiscan=3 is the
+// real ceiling here. Parameterizing v_cnt_2/_3/_4's thresholds the same way
+// OSD_THRESH0 already was lets vga_osd (the CRT/Direct Video instance only --
+// hdmi_osd keeps every stock default) skip past all three and land on that
+// ceiling. (Re-applied from commit aa9f090, which was reverted entirely for
+// an unrelated Stretch-feature regression -- this piece was never itself at
+// fault; see project_history/TASKS.md's 2026-10-02 entries.)
+parameter  OSD_THRESH1  =  12'd640;
+parameter  OSD_THRESH2  =  12'd960;
+parameter  OSD_THRESH3  =  12'd1280;
+
 localparam OSD_WIDTH    = 12'd256;
 localparam OSD_HEIGHT   = 12'd64;
 
@@ -132,10 +168,10 @@ wire [21:0] osd_h_hdr = (info || rot) ? osd_h : (osd_h + OSD_HDR);
 // pipeline the comparisons a bit
 always @(posedge clk_video) if(ce_pix) begin
 	v_cnt_h <= v_cnt <= osd_t;
-	v_cnt_1 <= v_cnt < 320;
-	v_cnt_2 <= v_cnt < 640;
-	v_cnt_3 <= v_cnt < 960;
-	v_cnt_4 <= v_cnt < 1280;
+	v_cnt_1 <= v_cnt < OSD_THRESH0;
+	v_cnt_2 <= v_cnt < OSD_THRESH1;
+	v_cnt_3 <= v_cnt < OSD_THRESH2;
+	v_cnt_4 <= v_cnt < OSD_THRESH3;
 
 	v_osd_start_h <= (v_cnt-(osd_h_hdr>>1))>>1;
 	v_osd_start_1 <= (v_cnt-osd_h_hdr)>>1;

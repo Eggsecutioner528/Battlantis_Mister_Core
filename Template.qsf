@@ -35,6 +35,22 @@ set_global_assignment -name ROUTER_LCELL_INSERTION_AND_LOGIC_DUPLICATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+
+# 2026-10-03, TEMPORARY test-only, task #75/#76 black-hole congestion
+# investigation: the Fitter report confirms k007420:sprite_gen alone uses
+# 17,270 ALMs -- 42% of the ENTIRE chip's logic, for one module -- and that
+# physical synthesis's own register retiming/combinational resynthesis grew
+# its combinational ALUTs by 23% (19,836->24,357) versus the pre-physical-
+# synthesis Analysis & Synthesis estimate, on a device already at 97% ALM /
+# 98% M10K utilization chip-wide. Scoped OFF specifically for this one
+# instance (global settings above stay ON, so the rest of the design keeps
+# its existing timing-closure margin) to test whether trading some of
+# k007420's own timing slack back for routing headroom helps real Fitter
+# congestion here. Revert (remove these two lines) if this doesn't help or
+# once a structural fix (Task #108's DDR3 reclaim, or the Phase 2a burst
+# design itself being leaner) makes it unnecessary.
+set_instance_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF -to "emu:emu|k007420:sprite_gen"
+set_instance_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION OFF -to "emu:emu|k007420:sprite_gen"
 set_global_assignment -name OPTIMIZATION_TECHNIQUE SPEED
 set_global_assignment -name MUX_RESTRUCTURE ON
 set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
@@ -48,9 +64,22 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 31
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
+
 
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
+set_global_assignment -name VERILOG_MACRO "FINAL_BUILD=1"
+
+# 2026-10-03, TEMPORARY test-only, task #75/#76 black-hole investigation:
+# frees the ~134 M10K blocks + associated logic the Direct Video CRT
+# rotation buffer costs, to test whether that's enough real headroom to get
+# the Phase 2a burst-read sprite-engine fix through real Quartus routing --
+# 5 straight genuine congestion failures (SEED27/28/29 x3) at this point,
+# all with rotation included. NOT a change to the actual developer-build
+# default (that stays full-featured; this is a one-off diagnostic compile).
+# Revert (remove this line) before any other compile, same discipline as
+# the now-retired DISABLE_CRT_ROTATION_TEST this replaces for this purpose.
 
 #enable it only if 8bit indexed mode is used in core
 #set_global_assignment -name VERILOG_MACRO "MISTER_FB_PALETTE=1"
@@ -76,6 +105,7 @@ set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
 source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip
+set_global_assignment -name VERILOG_FILE rtl/direct_video_rotate.v
 
 set_global_assignment -name PRE_FLOW_SCRIPT_FILE "quartus_sh:sys/build_id.tcl"
 set_location_assignment PIN_U9 -to ADC_CONVST
@@ -303,7 +333,6 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SDIO_DAT[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to SD_SPI*
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to USER_IO[*]
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to VGA_EN
-set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
 set_global_assignment -name VERILOG_FILE rtl/mc6809/mc6809i.v
 set_global_assignment -name VHDL_FILE rtl/t80/T80.vhd
 set_global_assignment -name VHDL_FILE rtl/t80/T80_ALU.vhd
@@ -345,3 +374,14 @@ set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_single_acc.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_slot_cnt.v
 set_global_assignment -name VERILOG_FILE rtl/jtopl/hdl/jtopl_timers.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hd6309/hd6309i.v
+set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
+# 2026-10-03: removed the entire auto_signaltap_0 SignalTap instrumentation
+# (task #113, set up to debug k007420's fill engine) -- this MiSTer has no
+# USB-Blaster/JTAG cable (see the no-jtag-usb-blaster-cable project memory),
+# so SignalTap's captured data was never actually retrievable here, meaning
+# its real chip cost (confirmed via the Fitter report: 343 ALMs across
+# sld_signaltap:auto_signaltap_0 + sld_hub:auto_hub, 3 M10K blocks, 26,624
+# acquisition-RAM bits) was pure dead weight on a device already at 97%
+# ALM / 98% M10K utilization. Removed as part of task #75/#76's black-hole
+# congestion investigation. Re-add from project_history/sprite_fill_signaltap.stp
+# (preserved) if SignalTap ever becomes usable on this hardware again.
