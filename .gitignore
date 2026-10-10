@@ -4,3 +4,4 @@ output_files/
 *.rpt
 *.summary
 *.qws
+*.clean.bat
