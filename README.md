@@ -64,10 +64,10 @@ No ROM data is included in this repository.
 
 | | | |
 |:-:|---|---|
-| <img src="docs/readme/icons/pad.png" width="48"> | **Single controls (the default)** | One set of controls. One pad plays everything: with two players the game takes turns and you pass the pad. **Start 2** begins a two player game. The game only reads the first pad, so a second pad does nothing in this mode |
-| <img src="docs/readme/icons/pads2.png" width="48"> | **Dual controls** | Each player has their own controller: player 1 uses the first pad, player 2 the second. The game takes turns, so each pad is live on its player's turn. Use it for a cabinet with two sides, a cocktail table, or two pads on a couch |
-| <img src="docs/readme/icons/gear.png" width="48"> | **How to switch** | **OSD > DIP Switches > Upright Controls**, Single or Dual. The game reads that switch only at start up, as the real board does, so the core restarts the game by itself when you change it. You do not need to reset anything. **Cocktail** cabinet always counts as Dual, so Upright Controls is greyed out while it is selected |
-| <img src="docs/readme/icons/joy.png" width="48"> | **Which pad is which** | The first pad you press a button on becomes player 1 and the next one player 2 (the MiSTer decides that). The controls work out of the box with each pad's default layout. To change it, use **Define joystick buttons** (OSD, press Right for the System menu) and press the buttons it asks for on that pad. Each controller **model** keeps its own map (a PS4 and a PS5 pad are two models), and two pads of the same model share one. The **Controller Setup** page in the OSD lists these steps and follows the Single or Dual setting |
+| <img src="docs/readme/icons/pad.png" height="72"> | **Single controls (the default)** | One set of controls. One pad plays everything: with two players the game takes turns and you pass the pad. **Start 2** begins a two player game. The game only reads the first pad, so a second pad does nothing in this mode |
+| <img src="docs/readme/icons/pads2.png" height="72"> | **Dual controls** | Each player has their own controller: player 1 uses the first pad, player 2 the second. The game takes turns, so each pad is live on its player's turn. Use it for a cabinet with two sides, a cocktail table, or two pads on a couch |
+| <img src="docs/readme/icons/gear.png" height="72"> | **How to switch** | **OSD > DIP Switches > Upright Controls**, Single or Dual. The game reads that switch only at start up, as the real board does, so the core restarts the game by itself when you change it. You do not need to reset anything. **Cocktail** cabinet always counts as Dual, so Upright Controls is greyed out while it is selected |
+| <img src="docs/readme/icons/joy.png" height="72"> | **Which pad is which** | The first pad you press a button on becomes player 1 and the next one player 2 (the MiSTer decides that). The controls work out of the box with each pad's default layout. To change it, use **Define joystick buttons** (OSD, press Right for the System menu) and press the buttons it asks for on that pad. Each controller **model** keeps its own map (a PS4 and a PS5 pad are two models), and two pads of the same model share one. The **Controller Setup** page in the OSD lists these steps and follows the Single or Dual setting |
 
 ## The OSD at a glance
 
@@ -77,14 +77,14 @@ Open the OSD with the button on your controller or **F12** on a keyboard. The fi
 
 | | | |
 |:-:|---|---|
-| <img src="docs/readme/icons/ver.png" width="48"> | **Game Version** | Restarts the game when you change it |
-| <img src="docs/readme/icons/tv.png" width="48"> | **Video** | Separate options for HDMI and for the analog CRT output. The CRT options do nothing on HDMI and the other way round |
-| <img src="docs/readme/icons/size.png" width="48"> | **CRT Size and Smoothing** | 182x208 is the default and the sharpest: every tile of the picture lands on a whole number of pixels. CRT Smoothing keeps the scaled picture even; turn it Off for plain pixels |
-| <img src="docs/readme/icons/tv.png" width="48"> | **VGA Scaler** | Off by default. When On, the analog port carries the HDMI picture (the rotated, sized and smoothed one) instead of the raw 15 kHz raster, so a VGA or other 31 kHz monitor works. Leave it Off for a 15 kHz CRT. It is the same switch as `vga_scaler=1` in `MiSTer.ini` |
-| <img src="docs/readme/icons/speaker.png" width="48"> | **Treble** | Under Sound Settings. Softens the FM chips for listeners who find them harsh. Original is the unfiltered sound |
-| <img src="docs/readme/icons/gear.png" width="48"> | **Service Mode** | Restarts the game when toggled, because the game only reads that switch at start up. Leave it Off for normal play |
-| <img src="docs/readme/icons/cocktail.png" width="48"> | **Cocktail Cabinet and Upright Cabinet Controls** | Both restart the game when you change them, for the same reason. **Cocktail** always counts as Dual controls, so Upright Controls is greyed out while Cocktail is selected |
-| <img src="docs/readme/icons/pads2.png" width="48"> | **Controller Setup** | A page that tells you the steps to set up your pad (or two pads), and follows the Single or Dual setting |
+| <img src="docs/readme/icons/ver.png" height="72"> | **Game Version** | Restarts the game when you change it |
+| <img src="docs/readme/icons/tv.png" height="72"> | **Video** | Separate options for HDMI and for the analog CRT output. The CRT options do nothing on HDMI and the other way round |
+| <img src="docs/readme/icons/size.png" height="72"> | **CRT Size and Smoothing** | 182x208 is the default and the sharpest: every tile of the picture lands on a whole number of pixels. CRT Smoothing keeps the scaled picture even; turn it Off for plain pixels |
+| <img src="docs/readme/icons/tv.png" height="72"> | **VGA Scaler** | Off by default. When On, the analog port carries the HDMI picture (the rotated, sized and smoothed one) instead of the raw 15 kHz raster, so a VGA or other 31 kHz monitor works. Leave it Off for a 15 kHz CRT. It is the same switch as `vga_scaler=1` in `MiSTer.ini` |
+| <img src="docs/readme/icons/speaker.png" height="72"> | **Treble** | Under Sound Settings. Softens the FM chips for listeners who find them harsh. Original is the unfiltered sound |
+| <img src="docs/readme/icons/gear.png" height="72"> | **Service Mode** | Restarts the game when toggled, because the game only reads that switch at start up. Leave it Off for normal play |
+| <img src="docs/readme/icons/cocktail.png" height="72"> | **Cocktail Cabinet and Upright Cabinet Controls** | Both restart the game when you change them, for the same reason. **Cocktail** always counts as Dual controls, so Upright Controls is greyed out while Cocktail is selected |
+| <img src="docs/readme/icons/pads2.png" height="72"> | **Controller Setup** | A page that tells you the steps to set up your pad (or two pads), and follows the Single or Dual setting |
 
 ## High scores
 
