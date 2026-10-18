@@ -104,3 +104,16 @@ set_output_delay -clock [get_clocks {SDRAM_CLK}] -min [expr {-($sdram_tIH + $sdr
 
 set_input_delay -clock [get_clocks {SDRAM_CLK}] -max [expr {$sdram_tAC + $sdram_skew_margin}] [get_ports {SDRAM_DQ[*]}]
 set_input_delay -clock [get_clocks {SDRAM_CLK}] -min [expr {$sdram_tOH - $sdram_skew_margin}] [get_ports {SDRAM_DQ[*]}]
+
+# ==============================================================================
+# Sprite engine: the video line counter reaches the sprite address registers only after it has settled (2026-10-12)
+# ==============================================================================
+# emu:emu|v_cnt feeds the sprite engine's ROM address calculation (rtl/k007420.v, calc_rom_addr) and that value is captured into last_byte_addr,
+# sprite_bram_addr and tap_addr in render state 12. v_cnt only changes once per scanline, at the h_cnt wrap. The engine restarts about 8 clocks later
+# (state 0) and then waits for the 256 entry line buffer clear (clear_idx, one entry per clock) before it reads a single OAM byte, so the first capture
+# in state 12 happens at least ~270 clocks after v_cnt changed. The timing analyzer cannot know that and treated the long v_cnt -> address arithmetic
+# path as a one clock path: it was the worst setup path of every build (-0.69 ns, -0.13 ns, +0.03 ns depending on placement luck) and the reason
+# builds needed seed hunting. A multicycle exception of 4 clocks (hold 3) is still extremely conservative against the real >= 270 clocks of settling.
+# It is restricted to these three capture registers; v_cnt[0] driving the line buffer ping-pong select (buf_sel) stays a normal one clock path.
+set_multicycle_path -setup -end -from [get_registers {emu:emu|v_cnt[*]}] -to [get_registers {emu:emu|k007420:sprite_gen|last_byte_addr[*] emu:emu|k007420:sprite_gen|sprite_bram_addr[*] emu:emu|k007420:sprite_gen|tap_addr[*]}] 4
+set_multicycle_path -hold  -end -from [get_registers {emu:emu|v_cnt[*]}] -to [get_registers {emu:emu|k007420:sprite_gen|last_byte_addr[*] emu:emu|k007420:sprite_gen|sprite_bram_addr[*] emu:emu|k007420:sprite_gen|tap_addr[*]}] 3

@@ -25,6 +25,7 @@ module sdram_arbiter (
     input         p3_req,
     input  [24:0] p3_addr,
     output reg [7:0] p3_dout,
+    output reg [7:0] p3_dout2,   // the other byte of the same 16 bit word (address ^ 1), free with every read
     output reg    p3_ready,
 
     // Port 3 in-flight indicator (2026-08-14, Test 221): exposes
@@ -227,6 +228,7 @@ module sdram_arbiter (
                             p2_ready <= 1;
                         end else if (active_port == 3) begin
                             p3_dout <= sdram_byte_out;
+                            p3_dout2 <= sdram_dout[7:0];
                             p3_ready <= 1;
                         end
                         state <= 3;

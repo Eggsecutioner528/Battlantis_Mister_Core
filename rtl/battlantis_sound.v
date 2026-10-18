@@ -16,6 +16,9 @@ module battlantis_sound (
     input  [14:0] ioctl_sound_addr,
     input   [7:0] ioctl_sound_data,
     input         ioctl_sound_we,
+    input   [4:0] vol1,        // Sound Settings: level of each chip, 0 = 100% ... 16 = off
+    input   [4:0] vol2,
+    input         stereo,      // Sound Settings: chip 1 left, chip 2 right
     output signed [15:0] audio_l,
     output signed [15:0] audio_r,
     output        irq_ack
@@ -89,10 +92,7 @@ module battlantis_sound (
         .nHALT(n_halt), .nM1(n_m1), .z80_a(), .z80_f_z()
     );
 
-    // Mix of the two chips (rounded average), as the diagnostic version did
-    wire signed [16:0] mixed_raw     = $signed(ym1_snd) + $signed(ym2_snd);
-    wire signed [16:0] mixed_rounded = mixed_raw + 17'sd1;
-    wire signed [15:0] mixed_audio   = mixed_rounded >>> 1;
-    assign audio_l = mixed_audio;
-    assign audio_r = mixed_audio;
+    // Mix of the two chips: rounded average, identical on both outputs, unless the Sound Settings page changes the levels or splits them left and
+    // right (rtl/snd_mixer.v; at its defaults it is bit for bit the old mix).
+    snd_mixer snd_mixer (.ym1(ym1_snd), .ym2(ym2_snd), .vol1(vol1), .vol2(vol2), .stereo(stereo), .audio_l(audio_l), .audio_r(audio_r));
 endmodule

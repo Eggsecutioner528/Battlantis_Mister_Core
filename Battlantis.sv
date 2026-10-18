@@ -67,6 +67,23 @@ wire [11:0] rot_ary = (ar == 2'd0) ? 12'd4 : (ar == 2'd1) ? 12'd8 : 12'd0;
 assign VIDEO_ARX = no_rotate ? raw_arx : rot_arx;
 assign VIDEO_ARY = no_rotate ? raw_ary : rot_ary;
 
+// CRT rotation (analog output) through the DDR3 hub, independent of the HDMI options above. CRT Orientation Horizontal (status[53]) rotates and scales
+// the CRT picture, CRT Flip (status[59]) turns it by 180 degrees in either orientation, CRT Size (status[58:54]) lists the default size first (182x208:
+// 13 / 16 of the game's pixels, so the 16 pixel grid cells come out exactly 13 pixels wide), then larger, then smaller.
+wire        crt_rot_sel    = status[53];                 // CRT Orientation Horizontal (rotated)
+wire        crt_flip       = status[59];                 // CRT Flip (180 degrees), in both orientations
+wire  [4:0] crt_size_idx   = status[58:54];              // 0..15 the listed sizes (default first, then larger, then smaller)
+wire  [3:0] crt_size_n     = (crt_size_idx > 5'd15) ? 4'd0 : crt_size_idx[3:0];   // a value from an older build's list (with Auto) falls back to the default
+wire  [3:0] crt_size       = (crt_size_n <= 4'd3) ? (4'd12 + crt_size_n) : (4'd15 - crt_size_n);
+// CRT position: the V and H options always mean what you see on the CRT. Rotated, the horizontal option moves along the raster lines (hs shift);
+// raw (a portrait CRT, raster up and down) the vertical option does.
+wire  [3:0] crt_hs_step    = crt_rot_sel ? status[49:46] : status[45:42];
+wire  [3:0] crt_vs_step    = crt_rot_sel ? status[45:42] : status[49:46];
+wire  [7:0] crt_r, crt_g, crt_b;
+wire        crt_hs, crt_vs, crt_de;
+wire        crt_ready;
+wire  [1:0] crt_status;
+
 `include "build_id.v"
 // Round 9 (2026-09-12): real DIP switches, confirmed directly from
 // bladestl_mame.cpp's INPUT_PORTS_START(bladestl_joy)/konamipt.h's
@@ -77,45 +94,79 @@ assign VIDEO_ARY = no_rotate ? raw_ary : rot_ary;
 localparam CONF_STR = {
 	"Battlantis;;",
 	"-;",
-	"P1,HDMI Video;",
-	"P1O[1],Orientation,Horizontal,Vertical;",
+	// Which game to run comes first, then a gap, then the sub pages (Video, Sound Settings and DIP Switches), then the reset entries.
+	"O[41:40],Game Version,Battlantis (version G),Battlantis (version F),Battlantis (Japan version E);",
+	"-;",
+	"P1,Video;",
+	"P1O[1],HDMI Orientation,Horizontal,Vertical;",
 	"P1O[2],Flip Monitor,Off,On;",
 	"P1O[4:3],Aspect ratio,Original,Pixel Perfect,Full Screen;",
-	"P2,CRT Video;",
-	// CRT position (analog output only; HDMI is not affected). The arcade monitor stands in portrait, so the raster's horizontal axis runs
-	// up and down on the tube: "CRT V Position" moves the picture along the raster lines (sync pulse earlier, one step = 3 pixel clocks),
-	// "CRT H Position" moves it along the raster columns (vertical sync later, one step = 2 lines).
-	"P2O[45:42],CRT V Position,0,3,6,9,12,15,18,21,24,27,30,33,36,39,42,45;",
-	"P2O[49:46],CRT H Position,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30;",
-	"-;",
+	"P1-;",
+	// CRT (analog output), independent of the HDMI options above. Orientation Vertical (raw) is the unrotated 15 kHz raster of the real board (a vertical
+	// monitor, or a CRT on its side). Horizontal (rotated) rotates and scales the picture through a DDR3 buffer (rtl/ddr_rotate_hub.sv) for a normally
+	// mounted CRT, Size picks the picture size. CRT Flip turns the CRT picture by 180 degrees in either
+	// orientation (counter clockwise instead of clockwise when rotated, upside down when raw) and it is the only rotation control.
+	// Position works in both modes by shifting the sync, and always means the direction you see on the CRT in the chosen orientation: in the rotated
+	// mode the horizontal option moves the picture along the raster lines (3 pixel clocks a step) and the vertical option along the raster columns
+	// (2 lines a step); in the raw mode the two swap roles (the raster runs up and down on a CRT that stands in portrait). No options are hidden.
+	"P1O[53],CRT Orientation,Vertical (raw),Horizontal (rotated);",
+	"P1O[59],CRT Flip,Off,On;",
+	"P1O[58:54],CRT Size,182x208,189x216,196x224,203x232,175x200,168x192,161x184,154x176,147x168,140x160,133x152,126x144,119x136,112x128,105x120,98x112;",
+	"P1O[60],CRT Aspect,Square pixels,Arcade 3:4;",
+	"P1O[61],CRT Smoothing,On,Off;",
+	"P1O[45:42],CRT V Position,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15;",
+	"P1O[49:46],CRT H Position,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15;",
+	// Sound Settings: the board mixes its two YM3812 chips to mono; here each chip gets a level (100% is the real board) and the output can be split
+	// stereo (chip 1 left, chip 2 right; the OSD label stays short: option values over 28 characters froze the OSD on hardware, see sim_scratch/check_conf_str.py). Everything on its first entry is bit for bit the original audio (rtl/snd_mixer.v). Status bits 29 to 39.
+	"P3,Sound Settings;",
+	"P3O[33:29],FM Chip 1 Volume,100%,94%,88%,81%,75%,69%,63%,56%,50%,44%,38%,31%,25%,19%,13%,6%,Off;",
+	"P3O[38:34],FM Chip 2 Volume,100%,94%,88%,81%,75%,69%,63%,56%,50%,44%,38%,31%,25%,19%,13%,6%,Off;",
+	"P3O[39],Output,Mono (original),Stereo (chips split);",
+	"P3O[8:7],Treble,Original,Soft,Softer,Muffled;",   // a low pass on the final output (corner about 7.5, 3.7 and 1.9 kHz); Original is bit for bit the mix above
 	// Factory defaults: with every option on its first entry the DIP switches read exactly as MAME's battlnts defaults (3 lives, bonus life at
 	// 30k and every 70k, difficulty Normal, demo sounds On, upright with single controls, 5 continues, coinage 1 coin 1 credit). The entry order
 	// is therefore NOT the order of the real DIP tables, see the translation in the DIP section.
-	"O[41:40],Game Version,Battlantis (version G),Battlantis (version F),Battlantis (Japan version E);",
-	"O[20:19],Lives,3,5,7,2;",
-	"O[12:11],Bonus Life,30k And Every 70k,40k And Every 80k,40k,50k;",
-	"O[14:13],Difficulty,Normal,Easy,Difficult,Very Difficult;",
-	"O[15],Demo Sounds,On,Off;",
-	"O[50],Continues,5 Times,3 Times;",
-	"O[10],Cabinet,Upright,Cocktail;",
-	"O[18],Upright Controls,Single,Dual;",
-	"O[16],Flip Screen,Off,On;",
-	"O[17],Service Mode,Off,On;",
-	"O[24:21],Coin A,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,Free Play;",
-	"O[28:25],Coin B,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,No Coin B;",
+	"P2,DIP Switches;",
+	"P2O[20:19],Lives,3,5,7,2;",
+	"P2O[12:11],Bonus Life,30k And Every 70k,40k And Every 80k,40k,50k;",
+	"P2O[14:13],Difficulty,Normal,Easy,Difficult,Very Difficult;",
+	"P2O[15],Demo Sounds,On,Off;",
+	"P2O[50],Continues,5 Times,3 Times;",
+	"P2O[10],Cabinet,Upright,Cocktail;",
+	"P2O[18],Upright Controls,Single,Dual;",
+	"P2O[16],Flip Screen,Off,On;",
+	"P2O[17],Service Mode,Off,On;",
+	"P2-;",
+	"P2O[24:21],Coin A,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,Free Play;",
+	"P2O[28:25],Coin B,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,No Coin B;",
+	"-;",
+	// High scores: the button saves the BEST 10 table and the HI score to the MiSTer (status bit 62, a trigger). A saved file is loaded and put back by itself
+	// after every boot; nothing is ever saved without pressing the button.
+	"T[62],Save High Scores;",
+	// Clear High Scores is a page that asks the question: only two choices, No (first, so it is the one highlighted) and Yes (status bits 5 and 6, one-shot buttons,
+	// nothing is stored in the settings). Yes puts the original scores back, in the game and in the saved file.
+	"P5,Clear High Scores;",
+	"H2P5-,Are you sure you want to;",
+	"H2P5-,clear your hi scores?;",
+	"H2P5-,They will be lost forever.;",
+	"H2P5-;",
+	"H2P5T[5],No;",
+	"H2P5T[6],Yes;",
 	"-;",
 `ifndef FINAL_BUILD
-	// Testing aid (developer builds only, FINAL_BUILD removes it): keeps the lives and continues counters at 99 so stage 16 is reachable.
-	"O[51],Debug 99 Lives/Continues,Off,On;",
+	// Cheats (developer builds only, FINAL_BUILD removes them).
+	"P4,Cheats;",
+	"P4O[51],99 Lives/Continues,Off,On;",
+	"P4O[52],Invincibility,Off,On;",
 	"-;",
 `endif
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,3;", // [optional] config version 0-99.
+	"v,4;", // [optional] config version 0-99.
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			  // so all options will get default values on first start.
 	// The J1 line is metadata, not a menu row, but its position shifts which item the OSD activates: it must sit right before the version line.
-	"J1,Fire,Coin,Start;",
+	"J1,Fire,Coin,Start,Start 2;",
 	"V,v",`BUILD_DATE
 };
 
@@ -131,6 +182,10 @@ wire [127:0] status;
 wire  [10:0] ps2_key;
 
 wire        ioctl_download;
+wire [15:0] ioctl_index;     // which file the HPS is sending: 0 the ROM set, 1 the high score file (NVRAM)
+wire        ioctl_upload;
+wire  [7:0] ioctl_din;
+wire        hs_upload_req;
 wire        ioctl_wr;
 wire [24:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
@@ -142,6 +197,7 @@ wire        ioctl_wait;
 wire [31:0] joystick_0, joystick_1;
 wire  [8:0] spinner_0, spinner_1, spinner_2, spinner_3;
 
+reg hs_menu_hide = 1'b0;   // OSD mask bit 2, driven by the Clear High Scores logic further down
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
 	.clk_sys(clk_sys),
@@ -153,7 +209,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({status[5]}),
+	.status_menumask({13'd0, hs_menu_hide, 2'b00}),   // bit 2 hides the lines of the Clear High Scores page (the 'H2' prefix in CONF_STR) for a moment after No or Yes: a page with nothing to show makes the OSD return to the main menu
 
 	.joystick_0(joystick_0),
 	.joystick_1(joystick_1),
@@ -163,6 +219,11 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.spinner_3(spinner_3),
 
 	.ioctl_download(ioctl_download),
+	.ioctl_index(ioctl_index),
+	.ioctl_upload(ioctl_upload),
+	.ioctl_upload_req(hs_upload_req),   // pulses about 1.4 s after the high score table last changed, the HPS then saves the file
+	.ioctl_upload_index(8'd1),
+	.ioctl_din(ioctl_din),
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
@@ -238,6 +299,7 @@ always @(posedge clk_sys) begin
     end
 end
 wire reset = sys_reset | ioctl_download | copy_busy | svc_rst;
+wire rom_idx = (ioctl_index[7:0] == 8'd0);   // the ROM download (the high score file arrives as index 1 and must not be written into the ROM memories)
 
 // Round 51: the SDRAM arbiter must NOT be held in reset while the ROM downloads. The MiSTer framework keeps its RESET output
 // asserted for the whole ioctl_download window (sys/sysmem.sv: ~init_reset_n | ~hps_h2f_reset_n | reset_core_req, with
@@ -470,12 +532,12 @@ wire active_area = (h_cnt < 256) && (v_cnt >= 16 && v_cnt < 240);
 // Round 55: the whole sync pulse can be moved earlier by CRT_H_SHIFT pixel clocks. The picture itself (h_cnt, the active window, the HDMI
 // path which only uses the data enable) does not move; on the analog output the sync pulse arrives earlier relative to the picture, so the
 // picture appears further to the right on the CRT. Front porch 48 / sync 32 / back porch 48 at shift 0.
-wire [5:0]  CRT_H_SHIFT = {status[45:42], 1'b0} + status[45:42];       // 3 pixel clocks per step
+wire [5:0]  CRT_H_SHIFT = {crt_hs_step, 1'b0} + crt_hs_step;       // 3 pixel clocks per step
 wire [10:0] hs_start = 11'd304 - {5'd0, CRT_H_SHIFT};
 wire [10:0] hs_end   = 11'd336 - {5'd0, CRT_H_SHIFT};
 wire HSync   = (h_cnt >= hs_start && h_cnt < hs_end);
 // Vertical sync later by 2 lines per step (CRT Horizontal Position on the portrait monitor); start wraps around the 264 line frame.
-wire [8:0] vs_start = (9'd244 + {3'd0, status[49:46], 1'b0} >= 9'd264) ? (9'd244 + {3'd0, status[49:46], 1'b0} - 9'd264) : (9'd244 + {3'd0, status[49:46], 1'b0});
+wire [8:0] vs_start = (9'd244 + {3'd0, crt_vs_step, 1'b0} >= 9'd264) ? (9'd244 + {3'd0, crt_vs_step, 1'b0} - 9'd264) : (9'd244 + {3'd0, crt_vs_step, 1'b0});
 wire [8:0] vs_end   = (vs_start + 9'd3 >= 9'd264) ? (vs_start + 9'd3 - 9'd264) : (vs_start + 9'd3);
 wire VSync   = (vs_start < vs_end) ? (v_cnt >= vs_start && v_cnt < vs_end) : (v_cnt >= vs_start || v_cnt < vs_end);
 wire HBlank  = ~(h_cnt < 256);
@@ -539,7 +601,7 @@ wire [24:0] upd_sdram_addr = src_addr;
 
 wire tile_sdram_req, sprite_sdram_req;
 wire [24:0] tile_sdram_addr, sprite_sdram_addr;
-wire [7:0]  tile_sdram_dout, sprite_sdram_dout;
+wire [7:0]  tile_sdram_dout, sprite_sdram_dout, sprite_sdram_dout2;
 wire        tile_sdram_ready, sprite_sdram_ready;
 wire        p3_active;
 
@@ -571,7 +633,7 @@ wire        p3_active;
 `ifdef VERILATOR
     reg p0_req_w /* verilator public_flat_rw */ = 1'b0;
 `else
-    wire p0_req_w = ioctl_download & ioctl_wr;
+    wire p0_req_w = ioctl_download & ioctl_wr & rom_idx;   // only the ROM file (index 0), never the high score file
 `endif
 
 `ifdef BOS_SDRAM_MON
@@ -608,6 +670,7 @@ sdram_arbiter bos_arbiter (
     .p3_req(sprite_sdram_req),
     .p3_addr(sprite_sdram_addr),
     .p3_dout(sprite_sdram_dout),
+    .p3_dout2(sprite_sdram_dout2),
     .p3_ready(sprite_sdram_ready),
     .p3_active(p3_active),
 
@@ -667,8 +730,6 @@ wire debug_99_lives_continues = status[51];
 `endif
 wire k007342_debug_hit = debug_99_lives_continues && k007342_we &&
     (cpu_addr == 16'h1090 || cpu_addr == 16'h1082 || cpu_addr == 16'h08BE);
-wire k007342_re =  cpu_rw && (k007342_cs || ctrl_cs);
-wire k007342_scroll_we = !cpu_rw && scroll_cs;
 
 wire [7:0] k007342_dout;
 wire [7:0] k007342_scroll_dout;
@@ -677,6 +738,255 @@ wire       k007342_priority;
 wire       int_enabled;
 wire       sprite_wrap_y;
 wire       flip_screen_req;
+
+// Cheat: Invincibility. The invincibility item (white outline player, TIME n countdown) is a handful of cells in the player object, found by
+// comparing MAME RAM dumps of the stage 5 pickup in versions G, F and E (identical addresses in all three):
+//   0x1380 player flags: 0xC1 alive and vulnerable, 0x81 invincible (bit 6 cleared), 0x00 no player
+//   0x1389 = 64, 0x1399 = 6, 0x13A9 = 128, 0x13B9 = 12 (the countdown, one tick per 64 frames)
+// Once per frame, on CPU bus cycles that do not touch the K007342, this reads 0x1380 through the K007342 CPU port: 0xC1 gets the pickup values
+// written (the game then behaves as if the item was just taken), 0x81 gets the countdown refreshed to 12 so it never runs out.
+`ifdef FINAL_BUILD
+wire cheat_invincible = 1'b0;
+`else
+wire cheat_invincible = status[52];
+`endif
+reg [19:0] ci_timer = 20'd0;
+reg [2:0]  ci_state = 3'd0;      // 0 idle, 1 read issue, 2 read sample, 3..7 write 0x1380, 0x1389, 0x1399, 0x13A9, 0x13B9
+reg        ci_drive = 1'b0;
+reg        ci_we_q  = 1'b0;
+reg [15:0] ci_addr_q = 16'd0;
+reg [7:0]  ci_din_q  = 8'd0;
+reg [7:0]  ci_flags  = 8'd0;
+reg        ci_pend   = 1'b0;      // once-per-frame trigger, latched because ci_timer == 0 lasts one clock and the steps run on every 4th
+wire ci_cycle_ok = (bos_cpu_clk_div == 2'b00) && !(k007342_cs || ctrl_cs);   // start of a CPU cycle that leaves the VRAM alone
+always @(posedge clk_sys) begin
+    ci_timer <= ci_timer + 1'd1;
+    if (ci_timer == 20'd0) ci_pend <= 1'b1;
+    if (reset || !cheat_invincible) begin
+        ci_state <= 3'd0; ci_drive <= 1'b0; ci_we_q <= 1'b0;
+    end else if (bos_clk_12m) begin
+        ci_drive <= 1'b0; ci_we_q <= 1'b0;                      // each injected access lasts one CPU phase (4 clocks)
+        case (ci_state)
+            3'd0: if (ci_pend) begin ci_pend <= 1'b0; ci_state <= 3'd1; end
+            3'd1: if (ci_cycle_ok) begin
+                ci_drive <= 1'b1; ci_addr_q <= 16'h1380; ci_state <= 3'd2;
+            end
+            3'd2: if (bos_cpu_clk_div == 2'b01) begin             // the read data of the access above is valid now
+                ci_flags <= k007342_dout;
+                ci_state <= (k007342_dout == 8'hC1) ? 3'd3 : (k007342_dout == 8'h81) ? 3'd7 : 3'd0;
+            end
+            default: if (ci_cycle_ok) begin
+                ci_drive <= 1'b1; ci_we_q <= 1'b1;
+                case (ci_state)
+                    3'd3: begin ci_addr_q <= 16'h1380; ci_din_q <= ci_flags & 8'hBF; end
+                    3'd4: begin ci_addr_q <= 16'h1389; ci_din_q <= 8'd64;  end
+                    3'd5: begin ci_addr_q <= 16'h1399; ci_din_q <= 8'd6;   end
+                    3'd6: begin ci_addr_q <= 16'h13A9; ci_din_q <= 8'd128; end
+                    default: begin ci_addr_q <= 16'h13B9; ci_din_q <= 8'd12; end
+                endcase
+                ci_state <= (ci_state == 3'd7) ? 3'd0 : ci_state + 1'd1;
+            end
+        endcase
+    end
+end
+// ==============================================================================
+// High score table persistence (restore automatic, saving on the OSD button). The real board has no battery RAM; this is a convenience on top, per the user (2026-10-16).
+// The BEST 10 RANKING table is 80 bytes at 0x1100-0x114F of the K007342 VRAM (10 entries of 8 bytes: 3 byte BCD score, stage, padding, 3 name tiles),
+// found by MAME write tracing on 2026-09-25. The game rewrites its factory table at every boot, so the saved table is NOT loaded at download time:
+//   1. a shadow copy (hs_ram) follows every write that reaches the VRAM at 0x1100-0x114F, real CPU writes and the restore below;
+//   2. the file the HPS loads (index 1) is kept in hs_sav; once it has arrived completely it is marked loaded;
+//   3. after each boot the game's own table writes are watched; when they have stopped for 4.2 s (the initialisation, RAM test included, is over) the 80 saved
+//      bytes are written into the VRAM through the same injection port the cheat uses (on CPU cycles that leave the VRAM alone), once per boot,
+//      followed by the 3 byte HI score cell at 0x1050 (the top of the screen shows it; the game copies it from the table during its own boot);
+//   4. the OSD button Save High Scores (a trigger) makes the core request an upload: the HPS then saves the shadow copy as the NVRAM file. Nothing is
+//      saved by itself, and never before the boot initialisation is over.
+// The two 80 byte arrays are plain logic (asynchronous read), no block RAM.
+// ==============================================================================
+wire hs_cycle_ok = (bos_cpu_clk_div == 2'b00) && !(k007342_cs || ctrl_cs);   // start of a CPU cycle that leaves the VRAM alone (same as the cheat)
+(* ramstyle = "MLAB, no_rw_check" *) reg [7:0] hs_ram [0:127];   // live shadow of the table (the file the HPS saves)
+(* ramstyle = "MLAB, no_rw_check" *) reg [7:0] hs_sav [0:127];   // the file the HPS loaded, used for the restore after boot
+reg        hs_got = 1'b0, hs_loaded = 1'b0, hs_dl_nv = 1'b0, hs_dl_q = 1'b0;
+// Two ways to decide that the game's own table initialisation is over (the saved scores must go in AFTER it, the game rewrites its factory table every boot):
+//   fast: 50 ms without a table write (HS_Q50), the game HAS written the table since the reset, and the table in the game passes a structure check (see
+//         hs_fcp_nok): this is the normal path, about 3.6 s after boot. The boot RAM test writes patterns in bursts 45 ms apart and the real table in two bursts
+//         21 ms apart, so a 50 ms gap alone is not enough, the structure check is what tells the real table from a RAM test pattern.
+//   slow: 4.2 s without a write (HS_QUIET), no check at all: the fallback if some game version's table does not pass the structure check.
+localparam [27:0] HS_Q50   = 28'd2_400_000;
+localparam [27:0] HS_QUIET = 28'd200_000_000;
+reg [27:0] hs_quiet = 28'd0;
+reg        hs_seen = 1'b0, hs_inj = 1'b0, hs_done = 1'b0, hs_drive = 1'b0;
+reg [6:0]  hs_i = 7'd0;
+reg [13:0] hs_addr_q = 14'd0;
+reg  [7:0] hs_din_q  = 8'd0;
+reg        hs_req = 1'b0, hs_btn_q = 1'b0, hs_cp_act = 1'b0, hs_cp_src = 1'b0;   // hs_cp_src: 0 copies the shadow to the restore copy (Save), 1 the factory table (Clear)
+reg  [6:0] hs_cp_i = 7'd0;
+(* ramstyle = "MLAB, no_rw_check" *) reg [7:0] hs_fac [0:127];   // the factory table the game wrote at boot (captured before the saved one is restored)
+reg        hs_fac_valid = 1'b0, hs_fcp_act = 1'b0, hs_fcp_ph = 1'b0, hs_c_q = 1'b0, hs_clr_pend = 1'b0, hs_fac_try = 1'b0, hs_fcp_bad = 1'b0;
+reg  [6:0] hs_fcp_i = 7'd0;
+// The factory table is captured only from a boot in which the game wrote its real table, and only if it looks like one: every entry's three name bytes must be
+// printable tile codes (0x20 to 0x7E). A boot that never writes the table (service mode runs only the RAM test) would otherwise leave RAM test patterns or zeros there,
+// and Clear would write a blank top 10. One attempt per boot (hs_fac_try), so a bad boot is simply tried again after the next reset.
+wire [7:0] hs_fcp_d    = hs_ram[hs_fcp_i];
+// structure of one 8 byte entry: bytes 0 to 2 the score in BCD (every nibble 0 to 9), byte 3 zero, byte 4 the stage (not checked), bytes 5 to 7 the name (printable tile codes)
+wire [2:0] hs_fcp_k    = hs_fcp_i[2:0];
+wire       hs_fcp_bcd  = (hs_fcp_d[7:4] <= 4'd9) && (hs_fcp_d[3:0] <= 4'd9);
+wire       hs_fcp_prn  = (hs_fcp_d >= 8'h20) && (hs_fcp_d <= 8'h7E);
+`ifdef SIM_HS_BADFAC
+wire       hs_fcp_nok  = 1'b0;   // simulation only: pretend the boot table never looked valid
+`else
+wire       hs_fcp_nok  = (hs_fcp_k <= 3'd2) ? hs_fcp_bcd : (hs_fcp_k == 3'd3) ? (hs_fcp_d == 8'h00) : (hs_fcp_k == 3'd4) ? 1'b1 : hs_fcp_prn;
+`endif
+
+// what actually reaches the K007342 CPU port: the restore, else the cheat, else the real CPU
+wire [13:0] k007342_cpu_addr = hs_drive ? hs_addr_q : (ci_drive ? ci_addr_q[13:0] : cpu_addr[13:0]);
+wire [7:0]  k007342_cpu_din  = hs_drive ? hs_din_q : ((ci_drive && ci_we_q) ? ci_din_q : (k007342_debug_hit ? 8'd99 : cpu_dout));
+wire        k007342_cpu_we   = hs_drive ? 1'b1 : (ci_drive ? ci_we_q : k007342_we);
+
+wire hs_save_btn = status[62];   // OSD Save High Scores button (a trigger: the bit is 1 while it is pressed)
+wire hs_tbl_we = k007342_we && (cpu_addr >= 16'h1100) && (cpu_addr <= 16'h114F);   // a real CPU write to the table
+wire hs_q50    = (hs_quiet >= HS_Q50);
+wire hs_qdone  = (hs_quiet >= HS_QUIET);
+wire hs_ready  = hs_done;                                            // the boot initialisation is over and the saved table, if any, is in
+assign hs_upload_req = hs_req;
+assign ioctl_din = (ioctl_upload && ioctl_index[7:0] == 8'd1) ? hs_ram[ioctl_addr[6:0]] : 8'h00;
+
+wire hs_nv_wr   = ioctl_wr && ioctl_download && (ioctl_index[7:0] == 8'd1);        // a byte of the file from the HPS
+wire hs_vram_wr = k007342_cpu_we && (k007342_cpu_addr >= 14'h1100) && (k007342_cpu_addr <= 14'h114F);   // a write that reaches the table cells
+wire hs_ram_we  = hs_nv_wr | hs_vram_wr;
+wire [6:0] hs_ram_wa = hs_nv_wr ? ioctl_addr[6:0] : k007342_cpu_addr[6:0];
+wire [7:0] hs_ram_wd = hs_nv_wr ? ioctl_dout : k007342_cpu_din;
+
+// hs_sav (what the restore writes) takes the file from the HPS, or a copy of the shadow when the Save button is pressed: a reset in the same session then
+// restores the scores that were just saved, without the HPS loading the file again
+wire       hs_sav_we = hs_nv_wr | hs_cp_act;
+wire [6:0] hs_sav_wa = hs_nv_wr ? ioctl_addr[6:0] : hs_cp_i;
+wire [7:0] hs_sav_wd = hs_nv_wr ? ioctl_dout : (hs_cp_src ? hs_fac[hs_cp_i] : hs_ram[hs_cp_i]);
+always @(posedge clk_sys) begin
+    if (hs_ram_we) hs_ram[hs_ram_wa] <= hs_ram_wd;
+    if (hs_sav_we) hs_sav[hs_sav_wa] <= hs_sav_wd;
+    if (hs_fcp_act && hs_fcp_ph) hs_fac[hs_fcp_i] <= hs_ram[hs_fcp_i];   // capturing the factory table (second pass, only after the structure check passed)
+end
+
+`ifdef SIM_HS_PRELOAD
+// Simulation only: a saved table (hs_preload.hex, 80 bytes) standing in for the NVRAM file the HPS would load
+initial begin $readmemh("hs_preload.hex", hs_sav, 0, 79); hs_loaded = 1'b1; end
+`endif
+`ifdef SIM_HS_TRACE
+reg [31:0] hs_clk = 32'd0;
+reg        hs_ready_q = 1'b0;
+reg        hs_hm_q = 1'b0;
+reg        rst_q = 1'b0, qd_q = 1'b0, dl_q2 = 1'b0, ld_q = 1'b0;
+integer    hs_k;
+always @(posedge clk_sys) begin
+    hs_clk <= hs_clk + 1'd1;
+    hs_ready_q <= hs_ready;
+    if (hs_menu_hide !== hs_hm_q) $display("[hs] clk=%0d menu hide mask = %0d", hs_clk, hs_menu_hide);
+    hs_hm_q <= hs_menu_hide;
+    rst_q <= reset;
+    dl_q2 <= ioctl_download;
+    ld_q <= hs_loaded;
+    if (ioctl_download != dl_q2) $display("[hs] clk=%0d ioctl_download=%b index=%0d", hs_clk, ioctl_download, ioctl_index);
+    if (hs_nv_wr) $display("[hs] clk=%0d nvram byte %0d = %h", hs_clk, ioctl_addr[6:0], ioctl_dout);
+    if (hs_loaded && !ld_q) $display("[hs] clk=%0d hs_loaded set (got=%b dl_nv=%b)", hs_clk, hs_got, hs_dl_nv);
+    if (reset && !rst_q) $display("[hs] clk=%0d reset asserted (sys_reset=%b ioctl_download=%b copy_busy=%b svc_rst=%b)", hs_clk, sys_reset, ioctl_download, copy_busy, svc_rst);
+    if (!reset && rst_q) $display("[hs] clk=%0d reset released", hs_clk);
+    if (hs_qdone && !qd_q) $display("[hs] clk=%0d quiet timer done (loaded=%b inj=%b done=%b)", hs_clk, hs_loaded, hs_inj, hs_done);
+    qd_q <= hs_qdone;
+    if (k007342_we && cpu_addr >= 16'h1050 && cpu_addr <= 16'h1052) $display("[hs] clk=%0d HI cell write %h = %h", hs_clk, cpu_addr, cpu_dout);
+    if (hs_tbl_we) $display("[hs] clk=%0d cpu write %h = %h  seen=%b qdone=%b inj=%b done=%b ready=%b", hs_clk, cpu_addr, cpu_dout, hs_seen, hs_qdone, hs_inj, hs_done, hs_ready);
+    if (hs_inj && !hs_drive && hs_i == 7'd0 && bos_clk_12m && hs_cycle_ok) $display("[hs] clk=%0d restore starts", hs_clk);
+    if (hs_done && !hs_inj && hs_ready && !hs_ready_q) $display("[hs] clk=%0d restore done", hs_clk);
+    if (hs_ready && !hs_ready_q) begin
+        $write("[hs] clk=%0d ready, table:", hs_clk);
+        for (hs_k = 0; hs_k < 80; hs_k = hs_k + 1) $write(" %02x", hs_ram[hs_k]);
+        $write("%c", 8'd10);
+    end
+    if (hs_req) begin
+        $write("[hs] clk=%0d UPLOAD REQUEST, table:", hs_clk);
+        for (hs_k = 0; hs_k < 80; hs_k = hs_k + 1) $write(" %02x", hs_ram[hs_k]);
+        $write("%c", 8'd10);
+    end
+end
+`endif
+
+// Leave the Clear High Scores page after No or Yes (the OSD keeps a page open after a trigger button, but drops back one level when every line of the page is hidden)
+reg hs_no_q = 1'b0, hs_yes_q = 1'b0;
+reg [25:0] hs_hide_cnt = 26'd0;
+always @(posedge clk_sys) begin
+    hs_no_q <= status[5];
+    hs_yes_q <= status[6];
+    if ((status[5] && !hs_no_q) || (status[6] && !hs_yes_q)) begin hs_menu_hide <= 1'b1; hs_hide_cnt <= 26'd48_000_000; end   // about 1 s at 48 MHz, long enough for the OSD to poll the mask
+    else if (hs_hide_cnt != 26'd0) begin hs_hide_cnt <= hs_hide_cnt - 26'd1; if (hs_hide_cnt == 26'd1) hs_menu_hide <= 1'b0; end
+end
+
+always @(posedge clk_sys) begin
+    hs_btn_q <= hs_save_btn;
+    hs_c_q <= status[6];
+    // factory table capture: once per power on, when the boot initialisation is over and before anything is restored
+    // fast path: the game wrote its table since the reset, 50 ms of quiet: check the structure of the table in the game (pass 0), if it is a real table keep a copy as the
+    // factory table (pass 1) and then restore the saved one (or just become ready when there is no saved file). One attempt per quiet period (hs_fac_try).
+    if (hs_q50 && hs_seen && !hs_fac_try && !hs_fcp_act && !hs_inj && !hs_done && !hs_cp_act) begin
+        hs_fcp_act <= 1'b1; hs_fcp_ph <= 1'b0; hs_fcp_i <= 7'd0; hs_fcp_bad <= 1'b0; hs_fac_try <= 1'b1;
+    end
+    if (hs_fcp_act) begin
+        if (!hs_fcp_ph && !hs_fcp_nok) hs_fcp_bad <= 1'b1;
+        if (hs_fcp_i == 7'd79) begin
+            if (!hs_fcp_ph) begin
+                if (hs_fcp_nok && !hs_fcp_bad) begin hs_fcp_ph <= 1'b1; hs_fcp_i <= 7'd0; end   // a real table: copy it
+                else hs_fcp_act <= 1'b0;                                                         // not a table (RAM test): wait for the next quiet period
+            end else begin
+                hs_fcp_act <= 1'b0; hs_fac_valid <= 1'b1;
+                if (hs_loaded) begin hs_inj <= 1'b1; hs_i <= 7'd0; end else hs_done <= 1'b1;
+            end
+        end else hs_fcp_i <= hs_fcp_i + 1'd1;
+    end
+    // slow path (fallback): 4.2 s of quiet and nothing happened yet: restore the saved table without any check
+    if (hs_qdone && !hs_fcp_act && !hs_inj && !hs_done && !hs_cp_act) begin
+        if (hs_loaded) begin hs_inj <= 1'b1; hs_i <= 7'd0; end else hs_done <= 1'b1;
+    end
+    // Clear High Scores: Yes (status[6]) erases, No (status[5]) does nothing. Only once the boot is over and the factory table is known.
+    if (status[6] && !hs_c_q && hs_ready && hs_fac_valid && !hs_cp_act && !hs_inj) begin hs_cp_act <= 1'b1; hs_cp_src <= 1'b1; hs_cp_i <= 7'd0; end
+    hs_dl_q <= ioctl_download;
+    if (ioctl_download) hs_dl_nv <= (ioctl_index[7:0] == 8'd1);
+    if (hs_nv_wr) hs_got <= 1'b1;
+    if (hs_dl_q && !ioctl_download && hs_dl_nv && hs_got) hs_loaded <= 1'b1;   // the whole file has arrived
+    if (hs_cp_act) begin                                                        // copying the shadow to the restore copy (80 clocks)
+        if (hs_cp_i == 7'd79) begin
+            hs_cp_act <= 1'b0; hs_loaded <= 1'b1;
+            if (hs_cp_src) begin hs_inj <= 1'b1; hs_i <= 7'd0; hs_done <= 1'b0; hs_clr_pend <= 1'b1; end   // Clear: write the factory table (and the HI cell) into the game now
+            else hs_done <= 1'b1;                                                                       // Save: the table is already in the game, no restore is needed
+        end
+        else hs_cp_i <= hs_cp_i + 1'd1;
+    end
+
+    if (reset) begin
+        hs_seen <= 1'b0; hs_fac_try <= 1'b0; hs_quiet <= 28'd0; hs_inj <= 1'b0; hs_done <= 1'b0; hs_i <= 7'd0; hs_drive <= 1'b0;
+        hs_req <= 1'b0;
+    end else begin
+        hs_req <= 1'b0;
+        // the boot initialisation of the table: 4.2 s without a write (counted from the end of the reset) ends it
+        // (the watch starts when the reset ends, not at the first write: after an OSD Reset the game may restart without touching the table at all)
+        if (hs_tbl_we && !hs_inj) begin hs_seen <= 1'b1; hs_quiet <= 28'd0; hs_fac_try <= 1'b0; end
+        else if (!hs_qdone) hs_quiet <= hs_quiet + 1'd1;
+        // the restore: one write per CPU cycle that leaves the VRAM alone
+        if (bos_clk_12m) begin
+            hs_drive <= 1'b0;
+            if (hs_inj && hs_cycle_ok) begin
+                hs_drive  <= 1'b1;
+                // 80 table bytes, then the 3 byte HI score shown at the top of the screen (VRAM 0x1050-0x1052, the game copies it from the first table
+                // entry during its own boot, so it must be restored separately; it is the first entry's score again)
+                hs_addr_q <= (hs_i < 7'd80) ? (14'h1100 + {7'd0, hs_i}) : (14'h1050 + {7'd0, hs_i} - 14'd80);
+                hs_din_q  <= (hs_i < 7'd80) ? hs_sav[hs_i] : hs_sav[hs_i - 7'd80];
+                if (hs_i == 7'd82) begin hs_inj <= 1'b0; hs_done <= 1'b1; if (hs_clr_pend) begin hs_clr_pend <= 1'b0; hs_req <= 1'b1; end end   // after a Clear the file is saved too
+                else hs_i <= hs_i + 1'd1;
+            end
+        end
+        // saving: the OSD button asks the HPS to save the shadow copy (ignored until the boot initialisation is over, so a boot time table is never saved)
+        if (hs_save_btn && !hs_btn_q && hs_ready && !hs_cp_act && !hs_inj) begin hs_req <= 1'b1; hs_cp_act <= 1'b1; hs_cp_src <= 1'b0; hs_cp_i <= 7'd0; end
+    end
+end
+wire k007342_re =  cpu_rw && (k007342_cs || ctrl_cs);
+wire k007342_scroll_we = !cpu_rw && scroll_cs;
 
 k007342 #(.OVERSCAN_MASK(0)) k007342_inst (
     .clk(clk_sys),
@@ -691,10 +1001,10 @@ k007342 #(.OVERSCAN_MASK(0)) k007342_inst (
     .flip_screen_req(flip_screen_req),
     .vram_bank(1'b0), // no evidence bladestl banks VRAM (same as Battlantis/Battlantis)
 
-    .cpu_addr(cpu_addr[13:0]),
-    .cpu_din(k007342_debug_hit ? 8'd99 : cpu_dout),
+    .cpu_addr(k007342_cpu_addr),
+    .cpu_din(k007342_cpu_din),
     .cpu_dout(k007342_dout),
-    .cpu_we(k007342_we),
+    .cpu_we(k007342_cpu_we),
     .cpu_re(k007342_re),
 
     .scroll_addr(cpu_addr[8:0]),
@@ -769,6 +1079,7 @@ k007420 #(.USE_PROM(0), .SPRITE_Y_ADJ(0)) sprite_gen (   // Battlantis sprites a
     .sprite_sdram_req(sprite_sdram_req),
     .sprite_sdram_addr(sprite_sdram_addr),
     .sprite_sdram_dout(sprite_sdram_dout),
+    .sprite_sdram_dout2(sprite_sdram_dout2),
     .sprite_sdram_ready(sprite_sdram_ready),
     .sprite_traffic_active(1'b1), // no boot-time self-test phase in this core (unlike Rack 'Em
                                    // Up's box8 loopback verify), so Port 3 traffic is always
@@ -868,7 +1179,7 @@ wire [7:0] rack_dsw3 = {
     ~status[17],                    // bit7 service mode
     ~status[18],                    // bit6 upright controls: OSD Single (0) -> 1
     ~status[16],                    // bit5 flip screen
-    ~(joystick_1[6] | kb_start2),   // bit4 start 2
+    ~(joystick_1[6] | joystick_0[7] | kb_start2),   // bit4 start 2 (Start 2 on controller 2, or the Start 2 button of controller 1, or key 2)
     ~(joystick_0[6] | kb_start1),   // bit3 start 1
     1'b1,                           // bit2 service 1
     ~(joystick_1[5] | kb_coin2),    // bit1 coin 2
@@ -982,7 +1293,7 @@ reg [3:0] ym_ce_div = 0;
 always @(posedge clk_sys) ym_ce_div <= ym_ce_div + 4'd1;
 wire ce_ym3812 = (ym_ce_div == 4'd15);      // 48 MHz / 16 = 3 MHz
 
-wire ioctl_sound_we = ioctl_download && ioctl_wr && ioctl_addr >= 25'h18000 && ioctl_addr < 25'h20000;   // 32 KB sound ROM
+wire ioctl_sound_we = ioctl_download && ioctl_wr && rom_idx && ioctl_addr >= 25'h18000 && ioctl_addr < 25'h20000;   // 32 KB sound ROM
 wire signed [15:0] audio_l, audio_r;
 battlantis_sound battlantis_sound (
     .clk(clk_sys),
@@ -994,12 +1305,26 @@ battlantis_sound battlantis_sound (
     .ioctl_sound_addr(ioctl_addr[14:0]),
     .ioctl_sound_data(ioctl_dout),
     .ioctl_sound_we(ioctl_sound_we),
+    .vol1(status[33:29]),
+    .vol2(status[38:34]),
+    .stereo(status[39]),
     .audio_l(audio_l),
     .audio_r(audio_r),
     .irq_ack(z80_irq_ack)
 );
-assign AUDIO_L = audio_l;
-assign AUDIO_R = audio_r;
+// Treble (OSD, Sound page): Original passes the mix through untouched, Soft / Softer / Muffled run it through a one pole low pass (rtl/audio_lp.v).
+wire signed [15:0] audio_out_l, audio_out_r;
+audio_lp audio_lp (
+    .clk(clk_sys),
+    .ce(ce_ym3812),
+    .mode(status[8:7]),
+    .in_l(audio_l),
+    .in_r(audio_r),
+    .out_l(audio_out_l),
+    .out_r(audio_out_r)
+);
+assign AUDIO_L = audio_out_l;
+assign AUDIO_R = audio_out_r;
 
 // Round 50: pixel_color (k007342/k007420, registered on ce_pix) and the palette lookup (registered on ce_pix)
 // put the picture 2 pixel clocks behind h_cnt. DE and the colour gating used the undelayed active_area, so
@@ -1027,8 +1352,8 @@ wire [23:0] mon_rgb24 = mon_flag ? 24'hFFFF00 : 24'h0000FF;
 
 // ---- video output ----------------------------------------------------------------------------------------------------------
 // Round 55: the picture now goes through the framework's arcade_video (sync polarity fix, blanking, gamma) exactly like Battlantis; its
-// outputs are the VGA_* pins, i.e. the raw 15 kHz raster for the analog (CRT) port, unrotated. screen_rotate takes the same signals and,
-// when Orientation is Horizontal, writes a rotated copy into DDR3 and switches the HDMI scaler to read it (framebuffer mode).
+// outputs feed the DDR3 hub, whose crt_* outputs are the VGA_* pins (raw 15 kHz raster or rotated picture). The hub takes the same signals and,
+// when HDMI Orientation is Horizontal, writes a rotated copy into DDR3 and switches the HDMI scaler to read it (framebuffer mode).
 `ifdef BOS_SDRAM_MON
 wire [7:0] out_r = mon_hit ? mon_rgb24[23:16] : (active_disp ? video_r : 8'd0);
 wire [7:0] out_g = mon_hit ? mon_rgb24[15:8]  : (active_disp ? video_g : 8'd0);
@@ -1064,12 +1389,14 @@ arcade_video #(256, 24) arcade_video (
     .gamma_bus(gamma_bus)
 );
 
-assign VGA_R  = av_vga_r;
-assign VGA_G  = av_vga_g;
-assign VGA_B  = av_vga_b;
-assign VGA_HS = av_vga_hs;
-assign VGA_VS = av_vga_vs;
-assign VGA_DE = av_vga_de;
+// The analog pins always come from the hub: the rotated picture while CRT Orientation is Horizontal, otherwise the same raw raster, both through the
+// same two pixel clock pipeline (so switching the option does not glitch the sync).
+assign VGA_R  = crt_r;
+assign VGA_G  = crt_g;
+assign VGA_B  = crt_b;
+assign VGA_HS = crt_hs;
+assign VGA_VS = crt_vs;
+assign VGA_DE = crt_de;
 
 // The game's own flip request (K007342 register 0 bit 4, written by the game when its Flip Screen DIP is on) and the OSD Flip Monitor are
 // combined with an xor: one flips, both cancel. In the rotated path the flip selects the rotation direction (clockwise or counter
@@ -1078,9 +1405,14 @@ assign VGA_DE = av_vga_de;
 // standing, never fully traced divergence in the old project notes, Rounds 213 to 221), which turned the HDMI picture upside down at boot.
 // Battlantis ignores it for the same reason (cocktail flip dropped as not authentic); the Flip Monitor option covers anyone who needs a flip.
 wire effective_flip = flip_monitor;
+// Cocktail cabinet: with the Cabinet DIP set to Cocktail the game itself flips the picture for player 2's turn (K007342 register 0 bit 4, flip_screen_req).
+// That is applied to the ANALOG output only (the MiSTer in a real cocktail cabinet drives a CRT through the analog port); the HDMI picture never
+// flips on its own. With the DIP on Upright the request is ignored altogether, which also keeps the toggling this ROM does at boot (a real board
+// does not show it) away from normal cabinets. Turns the CRT picture by 180 degrees in either CRT orientation, like the CRT Flip option.
+wire cocktail_flip = status[10] & flip_screen_req;
 wire video_rotated;
 
-screen_rotate screen_rotate (
+ddr_rotate_hub ddr_rotate_hub (
     .CLK_VIDEO(CLK_VIDEO),
     .CE_PIXEL(CE_PIXEL),
     .VGA_R(av_vga_r),
@@ -1105,10 +1437,27 @@ screen_rotate screen_rotate (
     .DDRAM_BUSY(DDRAM_BUSY),
     .DDRAM_BURSTCNT(DDRAM_BURSTCNT),
     .DDRAM_ADDR(DDRAM_ADDR),
+    .DDRAM_DOUT(DDRAM_DOUT),
+    .DDRAM_DOUT_READY(DDRAM_DOUT_READY),
     .DDRAM_DIN(DDRAM_DIN),
     .DDRAM_BE(DDRAM_BE),
     .DDRAM_WE(DDRAM_WE),
-    .DDRAM_RD(DDRAM_RD)
+    .DDRAM_RD(DDRAM_RD),
+    .crt_en(crt_rot_sel),
+    .crt_flip(crt_flip ^ cocktail_flip),   // CRT Flip option, plus the cocktail table's flip (analog output only)
+    .crt_size(crt_size),
+    .crt_sq(~status[60]),        // CRT Aspect: Square pixels (0, default) or Arcade 3:4 (1)
+    .crt_smooth(~status[61]),    // CRT Smoothing: On (0, default) or Off (1)
+    .crt_hpos(5'd16),            // picture position comes from the sync shift (CRT Position options), no extra trim
+    .crt_vpos(5'd16),
+    .crt_r(crt_r),
+    .crt_g(crt_g),
+    .crt_b(crt_b),
+    .crt_hs(crt_hs),
+    .crt_vs(crt_vs),
+    .crt_de(crt_de),
+    .crt_ready(crt_ready),
+    .crt_status(crt_status)
 );
 
 reg  [26:0] act_cnt;

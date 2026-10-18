@@ -64,11 +64,14 @@ set_global_assignment -name ECO_OPTIMIZE_TIMING ON
 set_global_assignment -name PERIPHERY_TO_CORE_PLACEMENT_AND_ROUTING_OPTIMIZATION ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name ALM_REGISTER_PACKING_EFFORT MEDIUM
-set_global_assignment -name SEED 31
+set_global_assignment -name SEED 38
 set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 4.0
 
 
 set_global_assignment -name VERILOG_MACRO "MISTER_FB=1"
+# Two way set associative sprite cache (rtl/k007420.v, SPRITE_2WAY): same 64 KB, but two tiles that collide no longer evict each other (2026-10-12: the cause of the missing sprite rows at the stage 2 boss).
+set_global_assignment -name VERILOG_MACRO "SPRITE_2WAY=1"
+# Release build: FINAL_BUILD removes the Cheats page and the debug options. Comment this line out for the developer build with Cheats.
 set_global_assignment -name VERILOG_MACRO "FINAL_BUILD=1"
 
 # 2026-10-03, TEMPORARY test-only, task #75/#76 black-hole investigation:

@@ -20,6 +20,9 @@
            0xB8000 banked ROM, version E      battlntsj/777_e03.8e
            0xC8000 fixed ROM, version E       battlntsj/777_e02.7e
          The file battlnts.zip must hold all of them, the F and E files inside the folders battlntsa and battlntsj. -->
+    <!-- High score table (the OSD option Save High Scores turns saving on or off): 80 bytes, the BEST 10 ranking table, saved by the core as an NVRAM file (index 1). -->
+    <nvram index="1" size="80"/>
+
     <rom index="0" zip="battlnts.zip" md5="none">
         <part name="777_g03.8e" />            <!-- 64KB banked ROM, version G -->
         <part name="777_g02.7e" />            <!-- 32KB fixed ROM, version G -->

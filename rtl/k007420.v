@@ -56,6 +56,7 @@ module k007420 #(
     output wire [24:0] sprite_sdram_addr,
     input  wire [7:0]  sprite_sdram_dout,
     input  wire        sprite_sdram_ready,
+    input  wire [7:0]  sprite_sdram_dout2,   // the other byte of the 16 bit word the last Port 3 read returned (address ^ 1)
 
     // Goes high once the top-level's local SDRAM loopback self-test has
     // finished and handed Port 3's req/addr lines over to this module (see
@@ -973,8 +974,240 @@ module k007420 #(
     // round-trip -- freeing up real SDRAM bandwidth for whatever few tiles
     // are genuinely new that frame, which the miss queue then lets multiple
     // of land in one pass instead of one per future re-scan.
-    localparam SPRITE_CACHE_ENTRIES = 2048;
-    (* ramstyle = "M10K" *) reg [7:0] sprite_cache [0:SPRITE_CACHE_ENTRIES*32-1]; // 64KB: {index[10:0], offset[4:0]}
+`ifdef SPRITE_2WAY
+    // ------------------------------------------------------------------------------------------------------------------------------------------
+    // TWO WAY SET ASSOCIATIVE SPRITE CACHE (+define+SPRITE_2WAY=1)
+    // The direct mapped cache (the other branch of this ifdef) uses the low 11 bits of the 13 bit tile number as the slot and the top 2 bits as the tag, so
+    // two tiles that differ only in the top bits (the same sprite code in another bank / colour set) always fight for one slot and evict each other every
+    // time both are on a line. A simulation with one slot per tile (no conflicts at all) removes nearly every missing sprite row seen in stage 2 (the wave
+    // of enemies and the boss), so those conflict misses are the real cause. This version keeps the same 2048 tiles / 64 KB but as 1024 sets of 2 ways:
+    // two colliding tiles can now both stay cached, and the least recently used way of a set is the one replaced. Each way is its own 32 KB M10K array
+    // read in parallel; the tag compare of both ways picks which one the output takes.
+    // ------------------------------------------------------------------------------------------------------------------------------------------
+    localparam SETW = 10;
+    localparam SETS = 1 << SETW;
+    localparam TAGW = 13 - SETW;
+    (* ramstyle = "M10K" *) reg [7:0] sprite_cache0 [0:SETS*32-1];   // way 0: {set, offset[4:0]}
+    (* ramstyle = "M10K" *) reg [7:0] sprite_cache1 [0:SETS*32-1];   // way 1
+    reg [TAGW-1:0] sprite_tag0 [0:SETS-1];
+    reg [TAGW-1:0] sprite_tag1 [0:SETS-1];
+    reg            sprite_valid0 [0:SETS-1];
+    reg            sprite_valid1 [0:SETS-1];
+    reg            sprite_lru [0:SETS-1];     // the way to replace next in this set (least recently used)
+
+    reg [17:0] sprite_bram_addr; // set by the render FSM (state 12 below); name kept for minimal diff
+    reg [7:0]  sprite_bram_dout; // the cache's tag-checked, registered output
+
+    wire [12:0]      sprite_cache_key = sprite_bram_addr[17:5];
+    wire [SETW-1:0]  c_set = sprite_cache_key[SETW-1:0];
+    wire [TAGW-1:0]  c_tag = sprite_cache_key[12:SETW];
+    wire c_hit0 = sprite_valid0[c_set] && (sprite_tag0[c_set] == c_tag);
+    wire c_hit1 = sprite_valid1[c_set] && (sprite_tag1[c_set] == c_tag);
+    wire c_hit  = c_hit0 || c_hit1;
+
+    reg [17:0] tap_addr;
+    reg        tap_valid;
+    wire       tap_claims_hit = c_hit;
+
+    localparam FILL_IDLE    = 2'd0;
+    localparam FILL_REQUEST = 2'd1;
+    localparam FILL_WAIT    = 2'd2;
+    localparam FILL_WR2     = 2'd3;   // second byte of the word just read
+
+    reg [1:0]       fill_state;
+    reg [SETW-1:0]  fill_set;
+    reg [TAGW-1:0]  fill_tag;
+    reg             fill_way;
+    reg [4:0]       fill_offset;
+    reg [24:0]      fill_sdram_addr_reg;
+    reg             fill_req_reg;
+    reg [17:0]      last_checked_addr;
+    reg             last_checked_valid;
+
+    localparam MISS_Q_DEPTH = 8;
+    reg [TAGW-1:0]  miss_q_tag   [0:MISS_Q_DEPTH-1];
+    reg [SETW-1:0]  miss_q_set   [0:MISS_Q_DEPTH-1];
+    reg             miss_q_valid [0:MISS_Q_DEPTH-1];
+
+    reg miss_already_pending;
+    integer mqi_chk;
+    always @* begin
+        miss_already_pending = (fill_state != FILL_IDLE && fill_set == c_set && fill_tag == c_tag);
+        for (mqi_chk = 0; mqi_chk < MISS_Q_DEPTH; mqi_chk = mqi_chk + 1)
+            if (miss_q_valid[mqi_chk] && miss_q_set[mqi_chk] == c_set && miss_q_tag[mqi_chk] == c_tag)
+                miss_already_pending = 1'b1;
+    end
+
+    reg [2:0] miss_q_free_slot;
+    reg       miss_q_has_free;
+    integer mqi_free;
+    always @* begin
+        miss_q_free_slot = 3'd0;
+        miss_q_has_free  = 1'b0;
+        for (mqi_free = MISS_Q_DEPTH - 1; mqi_free >= 0; mqi_free = mqi_free - 1)
+            if (!miss_q_valid[mqi_free]) begin
+                miss_q_free_slot = mqi_free[2:0];
+                miss_q_has_free  = 1'b1;
+            end
+    end
+
+    reg [2:0] miss_q_next_slot;
+    reg       miss_q_has_next;
+    integer mqi_next;
+    always @* begin
+        miss_q_next_slot = 3'd0;
+        miss_q_has_next  = 1'b0;
+        for (mqi_next = MISS_Q_DEPTH - 1; mqi_next >= 0; mqi_next = mqi_next - 1)
+            if (miss_q_valid[mqi_next]) begin
+                miss_q_next_slot = mqi_next[2:0];
+                miss_q_has_next  = 1'b1;
+            end
+    end
+
+    // Which way takes a new tile of set s: an empty way first, otherwise the least recently used one. "finishing" is the fill that completes in this very
+    // cycle (its way is about to become valid and most recently used, but the arrays still show the old state).
+    function pick_way;
+        input [SETW-1:0] s;
+        input            finishing;
+        reg occ0, occ1, lru_eff;
+        begin
+            occ0    = sprite_valid0[s] || (finishing && fill_set == s && !fill_way);
+            occ1    = sprite_valid1[s] || (finishing && fill_set == s &&  fill_way);
+            lru_eff = (finishing && fill_set == s) ? !fill_way : sprite_lru[s];
+            if (!occ0)      pick_way = 1'b0;
+            else if (!occ1) pick_way = 1'b1;
+            else            pick_way = lru_eff;
+        end
+    endfunction
+
+    // The first byte of every 16 bit word is written when the SDRAM read completes, the second a cycle later (see the direct mapped version).
+    reg  [7:0] fill_byte1;
+    wire       sprite_cache_write_en = ((fill_state == FILL_WAIT) && sprite_sdram_ready) || (fill_state == FILL_WR2);
+    wire [4:0] write_off             = {fill_offset[4:1], (fill_state == FILL_WR2)};
+    wire [7:0] sprite_cache_write_data = (fill_state == FILL_WR2) ? fill_byte1 : sprite_sdram_dout;
+    reg  [7:0] raw0, raw1;
+`ifdef SIM_PERFECT_SPRITES
+    reg [7:0] perfect_rom [0:262143];
+    always @(posedge clk) begin
+        if (ioctl_wr && ioctl_addr >= 25'h20000 && ioctl_addr < 25'h60000)
+            perfect_rom[ioctl_addr - 25'h20000] <= ioctl_dout;
+        raw0 <= perfect_rom[sprite_bram_addr];
+        raw1 <= 8'h00;
+    end
+`else
+    always @(posedge clk) begin
+        if (sprite_cache_write_en && !fill_way) sprite_cache0[{fill_set, write_off}] <= sprite_cache_write_data;
+        if (sprite_cache_write_en &&  fill_way) sprite_cache1[{fill_set, write_off}] <= sprite_cache_write_data;
+        raw0 <= sprite_cache0[{c_set, sprite_bram_addr[4:0]}];
+        raw1 <= sprite_cache1[{c_set, sprite_bram_addr[4:0]}];
+    end
+`endif
+
+    reg       sprite_forward_hit_d1;
+    reg [7:0] sprite_forward_data_d1;
+    reg       sprite_cache_hit_d1, sprite_way_d1;
+    always @(posedge clk) begin
+        sprite_forward_hit_d1  <= sprite_cache_write_en && (fill_set == c_set) && (fill_tag == c_tag) && (write_off == sprite_bram_addr[4:0]);
+        sprite_forward_data_d1 <= sprite_cache_write_data;
+`ifdef SIM_PERFECT_SPRITES
+        sprite_cache_hit_d1    <= 1'b1;
+        sprite_way_d1          <= 1'b0;
+`else
+        sprite_cache_hit_d1    <= c_hit;
+        sprite_way_d1          <= c_hit1;
+`endif
+    end
+
+    always @* begin
+        if (sprite_forward_hit_d1)       sprite_bram_dout = sprite_forward_data_d1;
+        else if (sprite_cache_hit_d1)    sprite_bram_dout = sprite_way_d1 ? raw1 : raw0;
+        else                             sprite_bram_dout = 8'h00;
+    end
+
+    integer sci;
+    always @(posedge clk) begin
+        if (reset) begin
+            fill_state <= FILL_IDLE;
+            fill_req_reg <= 1'b0;
+            last_checked_valid <= 1'b0;
+            for (sci = 0; sci < SETS; sci = sci + 1) begin
+                sprite_valid0[sci] = 1'b0;
+                sprite_valid1[sci] = 1'b0;
+                sprite_lru[sci]    = 1'b0;
+            end
+            for (sci = 0; sci < MISS_Q_DEPTH; sci = sci + 1) miss_q_valid[sci] = 1'b0;
+        end else begin
+            if (tap_valid && (!last_checked_valid || tap_addr != last_checked_addr)) begin
+                last_checked_addr  <= tap_addr;
+                last_checked_valid <= 1'b1;
+                if (c_hit) begin
+                    sprite_lru[c_set] <= c_hit0;           // the way just used is the most recent: the other one is replaced next
+                end else if (!miss_already_pending) begin
+                    if (fill_state == FILL_IDLE) begin
+                        fill_set    <= c_set;
+                        fill_tag    <= c_tag;
+                        fill_way    <= pick_way(c_set, 1'b0);
+                        fill_offset <= 5'd0;
+                        fill_state  <= FILL_REQUEST;
+                        if (!pick_way(c_set, 1'b0)) sprite_valid0[c_set] <= 1'b0; else sprite_valid1[c_set] <= 1'b0;
+                    end else if (miss_q_has_free) begin
+                        miss_q_tag[miss_q_free_slot]   <= c_tag;
+                        miss_q_set[miss_q_free_slot]   <= c_set;
+                        miss_q_valid[miss_q_free_slot] <= 1'b1;
+                    end
+                end
+            end
+
+            case (fill_state)
+                FILL_IDLE: ;
+                FILL_REQUEST: begin
+                    fill_sdram_addr_reg <= 25'h20000 + {7'd0, fill_tag, fill_set, fill_offset};
+                    fill_req_reg <= 1'b1;
+                    fill_state <= FILL_WAIT;
+                end
+                FILL_WAIT: begin
+                    if (sprite_sdram_ready) begin
+                        fill_req_reg <= 1'b0;
+                        fill_byte1   <= sprite_sdram_dout2;
+                        fill_state   <= FILL_WR2;
+                    end
+                end
+                FILL_WR2: begin
+                    if (fill_offset == 5'd30) begin
+                        if (!fill_way) begin sprite_tag0[fill_set] <= fill_tag; sprite_valid0[fill_set] <= 1'b1; end
+                        else           begin sprite_tag1[fill_set] <= fill_tag; sprite_valid1[fill_set] <= 1'b1; end
+                        sprite_lru[fill_set] <= !fill_way;
+                        if (miss_q_has_next) begin
+                            fill_set    <= miss_q_set[miss_q_next_slot];
+                            fill_tag    <= miss_q_tag[miss_q_next_slot];
+                            fill_way    <= pick_way(miss_q_set[miss_q_next_slot], 1'b1);
+                            fill_offset <= 5'd0;
+                            fill_state  <= FILL_REQUEST;
+                            if (!pick_way(miss_q_set[miss_q_next_slot], 1'b1)) sprite_valid0[miss_q_set[miss_q_next_slot]] <= 1'b0;
+                            else                                               sprite_valid1[miss_q_set[miss_q_next_slot]] <= 1'b0;
+                            miss_q_valid[miss_q_next_slot] <= 1'b0;
+                        end else begin
+                            fill_state <= FILL_IDLE;
+                        end
+                    end else begin
+                        fill_offset <= fill_offset + 5'd2;
+                        fill_state  <= FILL_REQUEST;
+                    end
+                end
+                default: fill_state <= FILL_IDLE;
+            endcase
+        end
+    end
+`else
+`ifdef SIM_FULL_CACHE
+    // Simulation only: one slot per tile of the whole sprite ROM (8192), so two tiles can never evict each other. If the missing sprite rows seen in
+    // stage 2 (a wave of enemies plus the boss) disappear with this, the cause is conflict misses of the 2048 slot direct mapped cache.
+    localparam CIDX_W = 13;
+`else
+    localparam CIDX_W = 11;
+`endif
+    localparam SPRITE_CACHE_ENTRIES = 1 << CIDX_W;
+    (* ramstyle = "M10K" *) reg [7:0] sprite_cache [0:SPRITE_CACHE_ENTRIES*32-1]; // 64KB: {index, offset[4:0]}
     reg [1:0]  sprite_cache_tag [0:SPRITE_CACHE_ENTRIES-1];
     reg        sprite_cache_valid [0:SPRITE_CACHE_ENTRIES-1];
 
@@ -985,8 +1218,13 @@ module k007420 #(
     // byte-within-tile offset; the tile index splits again into an 11-bit
     // physical cache index plus a 2-bit tag.
     wire [12:0] sprite_cache_key      = sprite_bram_addr[17:5];
-    wire [10:0] sprite_cache_index    = sprite_cache_key[10:0];
+`ifdef SIM_FULL_CACHE
+    wire [CIDX_W-1:0] sprite_cache_index    = sprite_cache_key[12:0];
+    wire [1:0]  sprite_cache_tag_want = 2'b00;
+`else
+    wire [CIDX_W-1:0] sprite_cache_index    = sprite_cache_key[10:0];
     wire [1:0]  sprite_cache_tag_want = sprite_cache_key[12:11];
+`endif
 
     // Miss-detection tap: latched once per genuinely-new fetch, alongside
     // sprite_bram_addr itself in state 12's non-dedup branch below.
@@ -997,9 +1235,10 @@ module k007420 #(
     localparam FILL_IDLE    = 2'd0;
     localparam FILL_REQUEST = 2'd1;
     localparam FILL_WAIT    = 2'd2;
+    localparam FILL_WR2     = 2'd3;   // second byte of the word just read
 
     reg [1:0]  fill_state;
-    reg [10:0] fill_index;
+    reg [CIDX_W-1:0] fill_index;
     reg [1:0]  fill_tag;
     reg [4:0]  fill_offset;
     reg [24:0] fill_sdram_addr_reg;
@@ -1013,9 +1252,9 @@ module k007420 #(
     // fill. Misses that arrive while a fill is already in flight are queued
     // here instead of dropped, and serviced back-to-back once the current
     // fill completes.
-    localparam MISS_Q_DEPTH = 4;
+    localparam MISS_Q_DEPTH = 8;
     reg [1:0]  miss_q_tag   [0:MISS_Q_DEPTH-1];
-    reg [10:0] miss_q_idx   [0:MISS_Q_DEPTH-1];
+    reg [CIDX_W-1:0] miss_q_idx   [0:MISS_Q_DEPTH-1];
     reg        miss_q_valid [0:MISS_Q_DEPTH-1];
 
     // Is this exact {index,tag} already being filled or already queued?
@@ -1033,29 +1272,29 @@ module k007420 #(
     end
 
     // First empty queue slot, for enqueueing a new miss.
-    reg [1:0] miss_q_free_slot;
+    reg [2:0] miss_q_free_slot;
     reg       miss_q_has_free;
     integer mqi_free;
     always @* begin
-        miss_q_free_slot = 2'd0;
+        miss_q_free_slot = 3'd0;
         miss_q_has_free  = 1'b0;
         for (mqi_free = MISS_Q_DEPTH - 1; mqi_free >= 0; mqi_free = mqi_free - 1)
             if (!miss_q_valid[mqi_free]) begin
-                miss_q_free_slot = mqi_free[1:0];
+                miss_q_free_slot = mqi_free[2:0];
                 miss_q_has_free  = 1'b1;
             end
     end
 
     // First occupied queue slot, for dequeueing once the current fill ends.
-    reg [1:0] miss_q_next_slot;
+    reg [2:0] miss_q_next_slot;
     reg       miss_q_has_next;
     integer mqi_next;
     always @* begin
-        miss_q_next_slot = 2'd0;
+        miss_q_next_slot = 3'd0;
         miss_q_has_next  = 1'b0;
         for (mqi_next = MISS_Q_DEPTH - 1; mqi_next >= 0; mqi_next = mqi_next - 1)
             if (miss_q_valid[mqi_next]) begin
-                miss_q_next_slot = mqi_next[1:0];
+                miss_q_next_slot = mqi_next[2:0];
                 miss_q_has_next  = 1'b1;
             end
     end
@@ -1064,15 +1303,31 @@ module k007420 #(
     // UNCONDITIONALLY every cycle into its own dedicated output register,
     // with nothing else sharing that always block. Hit/forward/miss
     // decision logic lives in a separate combinational mux stage below.
-    wire        sprite_cache_write_en   = (fill_state == FILL_WAIT) && sprite_sdram_ready;
-    wire [15:0] sprite_cache_write_addr = {fill_index, fill_offset};
-    wire [15:0] sprite_cache_read_addr  = {sprite_cache_index, sprite_bram_addr[4:0]};
+    // A fill reads the sprite ROM one 16 bit word (two bytes) at a time: the SDRAM controller already returns both bytes of the word, the arbiter now
+    // hands the second one out too (sprite_sdram_dout2), so a 32 byte tile takes 16 reads instead of 32. fill_offset always counts even addresses; the
+    // first byte is written in FILL_WAIT when the read completes, the second one a cycle later in FILL_WR2.
+    reg  [7:0]  fill_byte1;
+    wire        sprite_cache_write_en   = ((fill_state == FILL_WAIT) && sprite_sdram_ready) || (fill_state == FILL_WR2);
+    wire [CIDX_W+4:0] sprite_cache_write_addr = {fill_index, fill_offset[4:1], (fill_state == FILL_WR2)};
+    wire [7:0]  sprite_cache_write_data = (fill_state == FILL_WR2) ? fill_byte1 : sprite_sdram_dout;
+    wire [CIDX_W+4:0] sprite_cache_read_addr  = {sprite_cache_index, sprite_bram_addr[4:0]};
     reg  [7:0]  sprite_cache_raw_dout;
+`ifdef SIM_PERFECT_SPRITES
+    // Simulation only (+define+SIM_PERFECT_SPRITES=1): the whole sprite ROM is kept on chip and every read hits, so the picture does not depend on
+    // SDRAM timing at all. This is the ground truth the lateness tests compare the real cache against.
+    reg [7:0] perfect_rom [0:262143];
+    always @(posedge clk) begin
+        if (ioctl_wr && ioctl_addr >= 25'h20000 && ioctl_addr < 25'h60000)
+            perfect_rom[ioctl_addr - 25'h20000] <= ioctl_dout;
+        sprite_cache_raw_dout <= perfect_rom[sprite_bram_addr];
+    end
+`else
     always @(posedge clk) begin
         if (sprite_cache_write_en)
-            sprite_cache[sprite_cache_write_addr] <= sprite_sdram_dout;
+            sprite_cache[sprite_cache_write_addr] <= sprite_cache_write_data;
         sprite_cache_raw_dout <= sprite_cache[sprite_cache_read_addr];
     end
+`endif
 
     // Registered qualifiers for the mux below -- each updates on the same
     // edge sprite_cache_raw_dout does.
@@ -1082,8 +1337,12 @@ module k007420 #(
     always @(posedge clk) begin
         sprite_forward_hit_d1  <= sprite_cache_write_en && (sprite_cache_write_addr == sprite_cache_read_addr) &&
                                    (fill_tag == sprite_cache_tag_want);
-        sprite_forward_data_d1 <= sprite_sdram_dout;
+        sprite_forward_data_d1 <= sprite_cache_write_data;
+`ifdef SIM_PERFECT_SPRITES
+        sprite_cache_hit_d1    <= 1'b1;
+`else
         sprite_cache_hit_d1    <= sprite_cache_valid[sprite_cache_index] && (sprite_cache_tag[sprite_cache_index] == sprite_cache_tag_want);
+`endif
     end
 
     always @* begin
@@ -1125,36 +1384,46 @@ module k007420 #(
             case (fill_state)
                 FILL_IDLE: ; // waiting for the trigger above
                 FILL_REQUEST: begin
+`ifdef SIM_FULL_CACHE
+                    fill_sdram_addr_reg <= 25'h20000 + {7'd0, fill_index, fill_offset};
+`else
                     fill_sdram_addr_reg <= 25'h20000 + {7'd0, fill_tag, fill_index, fill_offset};
+`endif
                     fill_req_reg <= 1'b1;
                     fill_state <= FILL_WAIT;
                 end
                 FILL_WAIT: begin
                     if (sprite_sdram_ready) begin
                         fill_req_reg <= 1'b0;
-                        if (fill_offset == 5'd31) begin
-                            sprite_cache_tag[fill_index]   <= fill_tag;
-                            sprite_cache_valid[fill_index] <= 1'b1;
-                            if (miss_q_has_next) begin
-                                fill_index  <= miss_q_idx[miss_q_next_slot];
-                                fill_tag    <= miss_q_tag[miss_q_next_slot];
-                                fill_offset <= 5'd0;
-                                fill_state  <= FILL_REQUEST;
-                                sprite_cache_valid[miss_q_idx[miss_q_next_slot]] <= 1'b0;
-                                miss_q_valid[miss_q_next_slot] <= 1'b0;
-                            end else begin
-                                fill_state <= FILL_IDLE;
-                            end
+                        fill_byte1   <= sprite_sdram_dout2;
+                        fill_state   <= FILL_WR2;
+                    end
+                end
+                FILL_WR2: begin
+                    if (fill_offset == 5'd30) begin
+                        sprite_cache_tag[fill_index]   <= fill_tag;
+                        sprite_cache_valid[fill_index] <= 1'b1;
+                        if (miss_q_has_next) begin
+                            fill_index  <= miss_q_idx[miss_q_next_slot];
+                            fill_tag    <= miss_q_tag[miss_q_next_slot];
+                            fill_offset <= 5'd0;
+                            fill_state  <= FILL_REQUEST;
+                            sprite_cache_valid[miss_q_idx[miss_q_next_slot]] <= 1'b0;
+                            miss_q_valid[miss_q_next_slot] <= 1'b0;
                         end else begin
-                            fill_offset <= fill_offset + 5'd1;
-                            fill_state <= FILL_REQUEST;
+                            fill_state <= FILL_IDLE;
                         end
+                    end else begin
+                        fill_offset <= fill_offset + 5'd2;
+                        fill_state  <= FILL_REQUEST;
                     end
                 end
                 default: fill_state <= FILL_IDLE;
             endcase
         end
     end
+
+`endif
 
     // Latch 25'h20003 byte on the write-path instead of reading it with an extra
     // BRAM port (which broke simple dual-port inference and forced Quartus to
@@ -1394,5 +1663,71 @@ module k007420 #(
             endcase
         end
     end
+
+`ifdef SIM_BUDGET
+    // Simulation only: does the sprite engine finish all 64 sprites inside one scanline? The line restarts at h_cnt == 0 (state <= 0, sprite_idx <= 63);
+    // when that happens while state is not 16 (idle/done) the sprites that had not been reached yet (indices sprite_idx down to 0, the highest priority
+    // ones) are missing from that line. One summary line per frame: lines that ran out of time, the most sprites lost on one line, and the sum.
+    integer bud_frame = 0;
+    integer bud_over = 0, bud_maxdrop = 0, bud_sumdrop = 0, bud_maxclk = 0;
+    integer bud_clk = 0, bud_peak = 0;
+    reg bud_seen = 1'b0;
+    reg bud_vs_d = 1'b0;
+    always @(posedge clk) begin
+        if (!reset) begin
+            bud_vs_d <= (h_cnt == 0 && v_cnt == 0);
+            if (h_cnt == 0 && !last_h_cnt_0) begin
+                if (state != 16 && !sprite_idx[6] && v_cnt >= 16 && v_cnt < 240) begin
+                    bud_over    = bud_over + 1;
+                    bud_sumdrop = bud_sumdrop + sprite_idx + 1;
+                    if (sprite_idx + 1 > bud_maxdrop) bud_maxdrop = sprite_idx + 1;
+                end
+                bud_clk <= 0;
+                bud_seen <= 1'b0;
+            end else begin
+                bud_clk <= bud_clk + 1;
+                if (state == 16 && !bud_seen && v_cnt >= 16 && v_cnt < 240) begin
+                    bud_seen <= 1'b1;
+                    if (bud_clk > bud_peak) bud_peak = bud_clk;
+                end
+                if (state != 16 && bud_clk > bud_maxclk) bud_maxclk = bud_clk;
+            end
+            if (h_cnt == 0 && v_cnt == 0 && !bud_vs_d) begin
+                $display("BUD f=%0d over=%0d maxdrop=%0d sumdrop=%0d peakclk=%0d", bud_frame, bud_over, bud_maxdrop, bud_sumdrop, bud_peak);
+                bud_frame = bud_frame + 1; bud_over = 0; bud_maxdrop = 0; bud_sumdrop = 0; bud_maxclk = 0; bud_peak = 0;
+            end
+        end
+    end
+`endif
+
+`ifdef SIM_TRACE
+    // Simulation only: the ordered stream of sprite tile references (13 bit tile index = calc_rom_addr[17:5]) the render engine makes, as the cache
+    // sees it (one entry per new fetch address, consecutive repeats of the same tile dropped), written to a text file inside two frame windows given
+    // with +trace_lo1/+trace_hi1/+trace_lo2/+trace_hi2. Used to compare cache organisations offline (direct mapped, hashed index, set associative).
+    integer trc_fd = 0, trc_frame = 0, trc_lo1 = 0, trc_hi1 = 0, trc_lo2 = 0, trc_hi2 = 0;
+    reg trc_vs_d = 1'b0;
+    reg [12:0] trc_last = 13'h1FFF;
+    wire trc_on = (trc_frame >= trc_lo1 && trc_frame < trc_hi1) || (trc_frame >= trc_lo2 && trc_frame < trc_hi2);
+    initial begin
+        if (!$value$plusargs("trace_lo1=%d", trc_lo1)) trc_lo1 = 0;
+        if (!$value$plusargs("trace_hi1=%d", trc_hi1)) trc_hi1 = 0;
+        if (!$value$plusargs("trace_lo2=%d", trc_lo2)) trc_lo2 = 0;
+        if (!$value$plusargs("trace_hi2=%d", trc_hi2)) trc_hi2 = 0;
+        trc_fd = $fopen("/dev/shm/pf/tiletrace.txt", "w");
+    end
+    always @(posedge clk) begin
+        if (!reset) begin
+            trc_vs_d <= (h_cnt == 0 && v_cnt == 0);
+            if (h_cnt == 0 && v_cnt == 0 && !trc_vs_d) begin
+                trc_frame = trc_frame + 1;
+                if (trc_on) $fwrite(trc_fd, "F%0d\n", trc_frame);
+            end
+            if (trc_on && tap_valid && (!last_checked_valid || tap_addr != last_checked_addr) && tap_addr[17:5] != trc_last) begin
+                $fwrite(trc_fd, "%04h\n", {3'd0, tap_addr[17:5]} );
+                trc_last <= tap_addr[17:5];
+            end
+        end
+    end
+`endif
 
 endmodule
