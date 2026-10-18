@@ -2,7 +2,7 @@
 
 # Battlantis for MiSTer
 
-**Version 2.0.1** (release `releases/Battlantis_20261018.rbf`).
+**Version 2.0.2** (release `releases/Battlantis_20261018b.rbf`).
 
 Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch for the MiSTer FPGA. Three versions in one core, scores that save, a sharp picture on a CRT, and an OSD you can understand at a glance.
 
@@ -50,7 +50,7 @@ Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch 
 | | | |
 |:-:|---|---|
 | <img src="docs/readme/icons/chip.png" width="48"> | **You need** | The MiSTer **SDRAM module** and your own legally obtained ROM set |
-| <img src="docs/readme/icons/folder.png" width="48"> | **1. Core file** | Copy the core file (`Battlantis_20261018.rbf`) to `/media/fat/_Arcade/cores/` |
+| <img src="docs/readme/icons/folder.png" width="48"> | **1. Core file** | Copy the core file (`Battlantis_20261018b.rbf`) to `/media/fat/_Arcade/cores/` |
 | <img src="docs/readme/icons/doc.png" width="48"> | **2. MRA file** | Copy `Battlantis.mra` to `/media/fat/_Arcade/` |
 | <img src="docs/readme/icons/zip.png" width="48"> | **3. ROM set** | Put `battlnts.zip` in `/media/fat/games/mame/`. It must also contain the files of the other two versions (folders `battlntsa` and `battlntsj`), as in the full MAME set |
 | <img src="docs/readme/icons/play.png" width="48"> | **4. Play** | Start **Battlantis** from the Arcade menu |
@@ -77,6 +77,7 @@ Open the OSD with the button on your controller or **F12** on a keyboard. The fi
 | <img src="docs/readme/icons/ver.png" width="48"> | **Game Version** | Restarts the game when you change it |
 | <img src="docs/readme/icons/tv.png" width="48"> | **Video** | Separate options for HDMI and for the analog CRT output. The CRT options do nothing on HDMI and the other way round |
 | <img src="docs/readme/icons/size.png" width="48"> | **CRT Size and Smoothing** | 182x208 is the default and the sharpest: every tile of the picture lands on a whole number of pixels. CRT Smoothing keeps the scaled picture even; turn it Off for plain pixels |
+| <img src="docs/readme/icons/tv.png" width="48"> | **VGA Scaler** | Off by default. When On, the analog port carries the HDMI picture (the rotated, sized and smoothed one) instead of the raw 15 kHz raster, so a VGA or other 31 kHz monitor works. Leave it Off for a 15 kHz CRT. It is the same switch as `vga_scaler=1` in `MiSTer.ini` |
 | <img src="docs/readme/icons/speaker.png" width="48"> | **Treble** | Under Sound Settings. Softens the FM chips for listeners who find them harsh. Original is the unfiltered sound |
 | <img src="docs/readme/icons/gear.png" width="48"> | **Service Mode** | Restarts the game when toggled, because the game only reads that switch at start up. Leave it Off for normal play |
 | <img src="docs/readme/icons/cocktail.png" width="48"> | **Cabinet and Upright Controls** | Both restart the game when you change them, for the same reason. **Cocktail** always counts as Dual controls, so Upright Controls is greyed out while Cocktail is selected |
@@ -111,7 +112,7 @@ Konami's board has cocktail table support built into the game, so this is the re
 |:-:|---|---|---|
 | <img src="docs/readme/icons/rot.png" width="48"> | **Orientation** | HDMI Orientation | CRT Orientation (Vertical raw, or Horizontal rotated) |
 | <img src="docs/readme/icons/flip.png" width="48"> | **Flip** | Flip Monitor | CRT Flip |
-| <img src="docs/readme/icons/aspect.png" width="48"> | **Size and shape** | Aspect ratio | CRT Size and CRT Aspect  |
+| <img src="docs/readme/icons/aspect.png" width="48"> | **Size and shape** | Aspect ratio | CRT Size and CRT Aspect |
 | <img src="docs/readme/icons/smooth.png" width="48"> | **Smoothing** | The MiSTer scaler | CRT Smoothing |
 | <img src="docs/readme/icons/pos.png" width="48"> | **Position** | Not needed | CRT V Position and CRT H Position |
 

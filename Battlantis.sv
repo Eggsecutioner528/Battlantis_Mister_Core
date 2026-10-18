@@ -34,7 +34,6 @@ assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign FB_FORCE_BLANK = 1'b0;
 
 assign VGA_F1 = 0;
-assign VGA_SCALER  = 0;
 assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
@@ -114,6 +113,7 @@ localparam CONF_STR = {
 	"P1O[58:54],CRT Size,182x208,189x216,196x224,203x232,175x200,168x192,161x184,154x176,147x168,140x160,133x152,126x144,119x136,112x128,105x120,98x112;",
 	"P1O[60],CRT Aspect,Square pixels,Arcade 3:4;",
 	"P1O[61],CRT Smoothing,On,Off;",
+	"P1O[63],VGA Scaler,Off,On;",
 	"P1O[45:42],CRT V Position,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15;",
 	"P1O[49:46],CRT H Position,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15;",
 	// Sound Settings: the board mixes its two YM3812 chips to mono; here each chip gets a level (100% is the real board) and the output can be split
@@ -221,6 +221,9 @@ wire  [8:0] spinner_0, spinner_1, spinner_2, spinner_3;
 
 // Cabinet Cocktail always means separate controls for the two players (a control panel at each side of the table), so it counts as Upright Controls Dual.
 wire dual_ctrl = status[18] | status[10];
+// VGA Scaler (OSD, off by default): the analog port carries the HDMI scaler's picture (our rotated, sized and smoothed framebuffer) instead of the raw 15 kHz raster,
+// for a VGA or other 31 kHz monitor. The same switch as vga_scaler=1 in MiSTer.ini. Leave it off for a 15 kHz CRT.
+assign VGA_SCALER = status[63];
 reg hs_menu_hide = 1'b0;   // OSD mask bit 2, driven by the Clear High Scores logic further down
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
