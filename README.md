@@ -13,7 +13,7 @@ Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch 
 
 | | | |
 |:-:|---|---|
-| <img src="docs/readme/icons/sword.png" width="48"> | **Game** | Clear every enemy off the screen to move on. 16 stages, and the Emperor Asmodeus waits at the end |
+| <img src="docs/readme/icons/logo.png" width="96"> | **Game** | Clear every enemy off the screen to move on. 16 stages, and the Emperor Asmodeus waits at the end |
 | <img src="docs/readme/icons/ver.png" width="48"> | **Versions** | World (G), version F and Japan (E), picked in the OSD |
 | <img src="docs/readme/icons/pads2.png" width="48"> | **Players** | 1 or 2, Can share a controller or each with their own controller |
 | <img src="docs/readme/icons/trophy.png" width="48"> | **High scores** | Load by themselves, save with one button, can be reset to the original table |
