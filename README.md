@@ -31,7 +31,7 @@ Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch 
 |:-:|---|---|
 | <img src="docs/readme/icons/joy.png" width="48"> | **Move and shoot** | Move left, right, up and down, and shoot with one button |
 | <img src="docs/readme/icons/shield.png" width="48"> | **Clear the screen** | Clear every enemy off the screen to finish the stage. If the enemies take over your castle wall, it is over |
-| <img src="docs/readme/icons/wand.png" width="48"> | **Destroy the P-Box** | Shooting the P-Box gives you a power up. The card shows six items (below) |
+| <img src="docs/readme/icons/wand.png" width="48"> | **Destroy the P-Box** | Shooting the P-Cart gives you a power up.  The Power-up Crests can be seen below.) |
 | <img src="docs/readme/icons/heart.png" width="48"> | **Continue** | You can continue after losing all lives. The number of continues is a DIP switch option |
 
 **Power items**
