@@ -111,7 +111,7 @@ Konami's board has cocktail table support built into the game, so this is the re
 |:-:|---|---|---|
 | <img src="docs/readme/icons/rot.png" width="48"> | **Orientation** | HDMI Orientation | CRT Orientation (Vertical raw, or Horizontal rotated) |
 | <img src="docs/readme/icons/flip.png" width="48"> | **Flip** | Flip Monitor | CRT Flip |
-| <img src="docs/readme/icons/aspect.png" width="48"> | **Size and shape** | Aspect ratio | CRT Size and CRT Aspect (Square pixels is right for this game) |
+| <img src="docs/readme/icons/aspect.png" width="48"> | **Size and shape** | Aspect ratio | CRT Size and CRT Aspect  |
 | <img src="docs/readme/icons/smooth.png" width="48"> | **Smoothing** | The MiSTer scaler | CRT Smoothing |
 | <img src="docs/readme/icons/pos.png" width="48"> | **Position** | Not needed | CRT V Position and CRT H Position |
 
