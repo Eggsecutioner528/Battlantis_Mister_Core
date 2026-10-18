@@ -80,7 +80,7 @@ Open the OSD with the button on your controller or **F12** on a keyboard. The fi
 | <img src="docs/readme/icons/tv.png" width="48"> | **VGA Scaler** | Off by default. When On, the analog port carries the HDMI picture (the rotated, sized and smoothed one) instead of the raw 15 kHz raster, so a VGA or other 31 kHz monitor works. Leave it Off for a 15 kHz CRT. It is the same switch as `vga_scaler=1` in `MiSTer.ini` |
 | <img src="docs/readme/icons/speaker.png" width="48"> | **Treble** | Under Sound Settings. Softens the FM chips for listeners who find them harsh. Original is the unfiltered sound |
 | <img src="docs/readme/icons/gear.png" width="48"> | **Service Mode** | Restarts the game when toggled, because the game only reads that switch at start up. Leave it Off for normal play |
-| <img src="docs/readme/icons/cocktail.png" width="48"> | **Cabinet and Upright Controls** | Both restart the game when you change them, for the same reason. **Cocktail** always counts as Dual controls, so Upright Controls is greyed out while Cocktail is selected |
+| <img src="docs/readme/icons/cocktail.png" width="48"> | **Cocktail Cabinet and Upright Cabinet Controls** | Both restart the game when you change them, for the same reason. **Cocktail** always counts as Dual controls, so Upright Controls is greyed out while Cocktail is selected |
 | <img src="docs/readme/icons/pads2.png" width="48"> | **Controller Setup** | A page that tells you the steps to set up your pad (or two pads), and follows the Single or Dual setting |
 
 ## High scores
