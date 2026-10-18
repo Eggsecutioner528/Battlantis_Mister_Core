@@ -63,8 +63,10 @@ No ROM data is included in this repository.
 
 | | | |
 |:-:|---|---|
-| <img src="docs/readme/icons/pads2.png" width="48"> | **Two players** | Player 1 uses the first controller, player 2 the second. The first pad you press a button on becomes player 1 and the next one player 2 (the MiSTer decides that). The controls work out of the box with each pad's default layout. To change it, use **Define joystick buttons** (OSD, press Right for the System menu) and press the buttons it asks for on that pad. Each controller **model** keeps its own map (a PS4 and a PS5 pad are two models), and two pads of the same model share one. The game takes turns, so each player's pad is live on that player's turn. The **Controller Setup** page in the OSD lists these steps |
-| <img src="docs/readme/icons/pad.png" width="48"> | **One pad** | **Start 2** begins a two player game, but both players then share that pad |
+| <img src="docs/readme/icons/pad.png" width="48"> | **Single controls (the default)** | One set of controls. One pad plays everything: with two players the game takes turns and you pass the pad. **Start 2** begins a two player game. The game only reads the first pad, so a second pad does nothing in this mode |
+| <img src="docs/readme/icons/pads2.png" width="48"> | **Dual controls** | Each player has their own controller: player 1 uses the first pad, player 2 the second. The game takes turns, so each pad is live on its player's turn. Use it for a cabinet with two sides, a cocktail table, or two pads on a couch |
+| <img src="docs/readme/icons/gear.png" width="48"> | **How to switch** | **OSD > DIP Switches > Upright Controls**, Single or Dual. The game reads that switch only at start up, as the real board does, so the core restarts the game by itself when you change it. You do not need to reset anything. **Cocktail** cabinet always counts as Dual, so Upright Controls is greyed out while it is selected |
+| <img src="docs/readme/icons/joy.png" width="48"> | **Which pad is which** | The first pad you press a button on becomes player 1 and the next one player 2 (the MiSTer decides that). The controls work out of the box with each pad's default layout. To change it, use **Define joystick buttons** (OSD, press Right for the System menu) and press the buttons it asks for on that pad. Each controller **model** keeps its own map (a PS4 and a PS5 pad are two models), and two pads of the same model share one. The **Controller Setup** page in the OSD lists these steps and follows the Single or Dual setting |
 
 ## The OSD at a glance
 
