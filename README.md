@@ -18,7 +18,7 @@ Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch 
 | <img src="docs/readme/icons/pads2.png" width="48"> | **Players** | 1 or 2, Can share a controller or each with their own controller |
 | <img src="docs/readme/icons/trophy.png" width="48"> | **High scores** | Load by themselves, save with one button, can be reset to the original table |
 | <img src="docs/readme/icons/crt.png" width="48"> | **Picture** | HDMI (rotated for a normal TV) and analog CRT (rotated, sized and smoothed from the OSD) |
-| <img src="docs/readme/icons/cocktail.png" width="48"> | **Cocktail table** | Real cocktail cabinet support: the picture flips for player 2 on the analog output |
+| <img src="docs/readme/icons/cocktail.png" width="48"> | **Cocktail table** | Real cocktail cabinet support: the picture flips for player 2 on the analog and digital output |
 | <img src="docs/readme/icons/speaker.png" width="48"> | **Sound** | Two YM3812 FM chips, mono or split stereo, a Treble option, volume per chip |
 
 ## How to play
