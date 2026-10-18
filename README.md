@@ -119,6 +119,8 @@ Konami's board has cocktail table support built into the game, so this is the re
 | <img src="docs/readme/icons/smooth.png" width="48"> | **Smoothing** | The MiSTer scaler | CRT Smoothing |
 | <img src="docs/readme/icons/pos.png" width="48"> | **Position** | Not needed | CRT V Position and CRT H Position |
 
+![Battlantis](docs/readme/background_strip.jpg)
+
 ## Credits
 
 | | | |
