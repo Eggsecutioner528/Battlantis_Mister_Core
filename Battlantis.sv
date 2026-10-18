@@ -133,12 +133,34 @@ localparam CONF_STR = {
 	"P2O[15],Demo Sounds,On,Off;",
 	"P2O[50],Continues,5 Times,3 Times;",
 	"P2O[10],Cabinet,Upright,Cocktail;",
-	"P2O[18],Upright Controls,Single,Dual;",
+	"D4P2O[18],Upright Controls,Single,Dual;",   // greyed out while Cabinet is Cocktail (mask bit 4): Cocktail forces Dual
 	"P2O[16],Flip Screen,Off,On;",
 	"P2O[17],Service Mode,Off,On;",
 	"P2-;",
 	"P2O[24:21],Coin A,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,Free Play;",
 	"P2O[28:25],Coin B,1C 1C,4C 1C,3C 1C,2C 1C,3C 2C,4C 3C,3C 4C,2C 3C,1C 2C,2C 5C,1C 3C,1C 4C,1C 5C,1C 6C,1C 7C,No Coin B;",
+	"P6,Controller Setup;",
+	"H3P6-,Upright Controls: Single;",
+	"H3P6-,Changing it restarts game.;",
+	"H3P6-,One set of controls.;",
+	"H3P6-,Set up your pad once:;",
+	"H3P6-,1 Back to the main menu;",
+	"H3P6-,2 Press Right (System);",
+	"H3P6-,3 Define joystick buttons;",
+	"H3P6-,4 Press what it asks:;",
+	"H3P6-,Fire Coin Start Start 2;",
+	"h3P6-,Upright Controls: Dual;",
+	"h3P6-,Changing it restarts game.;",
+	"h3P6-,Cocktail cabinet = Dual;",
+	"h3P6-,Player 1: the first pad;",
+	"h3P6-,Player 2: the second pad;",
+	"h3P6-,Set up each pad once:;",
+	"h3P6-,1 Back to the main menu;",
+	"h3P6-,2 Press Right (System);",
+	"h3P6-,3 Define joystick buttons;",
+	"h3P6-,4 On the pad you set up;",
+	"h3P6-,press what it asks:;",
+	"h3P6-,Fire Coin Start Start 2;",
 	"-;",
 	// High scores: the button saves the BEST 10 table and the HI score to the MiSTer (status bit 62, a trigger). A saved file is loaded and put back by itself
 	// after every boot; nothing is ever saved without pressing the button.
@@ -197,6 +219,8 @@ wire        ioctl_wait;
 wire [31:0] joystick_0, joystick_1;
 wire  [8:0] spinner_0, spinner_1, spinner_2, spinner_3;
 
+// Cabinet Cocktail always means separate controls for the two players (a control panel at each side of the table), so it counts as Upright Controls Dual.
+wire dual_ctrl = status[18] | status[10];
 reg hs_menu_hide = 1'b0;   // OSD mask bit 2, driven by the Clear High Scores logic further down
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
@@ -209,7 +233,7 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask({13'd0, hs_menu_hide, 2'b00}),   // bit 2 hides the lines of the Clear High Scores page (the 'H2' prefix in CONF_STR) for a moment after No or Yes: a page with nothing to show makes the OSD return to the main menu
+	.status_menumask({11'd0, status[10], dual_ctrl, hs_menu_hide, 2'b00}),   // bit 2 hides the lines of the Clear High Scores page (the 'H2' prefix in CONF_STR) for a moment after No or Yes: a page with nothing to show makes the OSD return to the main menu
 
 	.joystick_0(joystick_0),
 	.joystick_1(joystick_1),
@@ -247,13 +271,15 @@ pll pll
 );
 
 wire sys_reset = RESET | status[0] | buttons[1];
-// Service Mode toggled in the OSD: the game only looks at the service switch at start up, so restart it (about 40 ms of reset).
-reg        svc_d = 1'b0;
+
+// Service Mode, Cabinet or Upright Controls changed in the OSD: the game only reads those switches at start up (a 2 player game with Upright Controls Dual
+// still read pad 1 on both turns when the switch was changed after the boot, found in simulation 2026-10-18), so restart it (about 40 ms of reset).
+reg  [2:0] svc_d = 3'b000;
 reg [21:0] svc_cnt = 22'd0;
 wire       svc_rst = (svc_cnt != 22'd0);
 always @(posedge clk_sys) begin
-    svc_d <= status[17];
-    if (svc_d != status[17]) svc_cnt <= 22'd2000000;
+    svc_d <= {status[18], status[17], status[10]};
+    if (svc_d != {status[18], status[17], status[10]}) svc_cnt <= 22'd2000000;
     else if (svc_cnt != 22'd0) svc_cnt <= svc_cnt - 22'd1;
 end
 // ---- Game version select and ROM copy engine ----
@@ -1144,9 +1170,9 @@ end
 // PLAYER INPUTS / DIP SWITCHES (MAME battlnts.cpp INPUT_PORTS battlantis, konamipt.h macros)
 // ==============================================================================
 // Controller buttons (J1 line): bit 4 = Fire, bit 5 = Coin, bit 6 = Start. The second controller is player 2 with the same layout.
-// Keyboard: coin 5 and 6, start 1 and 2, player 2 on R F D G (up down left right) and A (Fire); player 1 keyboard play comes through
+// Keyboard: coin 5 and 6, start 1 and 2 only (player 2 has no keyboard stick or fire, removed on request in v2.0.1); player 1 keyboard play comes through
 // the framework's joystick mapping (joystick_0).
-reg kb_coin1, kb_coin2, kb_start1, kb_start2, kb_up2, kb_dn2, kb_lf2, kb_rt2, kb_b1_2;
+reg kb_coin1, kb_coin2, kb_start1, kb_start2;
 reg kb_old_stb;
 always @(posedge clk_sys) begin
     kb_old_stb <= ps2_key[10];
@@ -1156,16 +1182,11 @@ always @(posedge clk_sys) begin
             8'h36: kb_coin2  <= ps2_key[9];   // 6
             8'h16: kb_start1 <= ps2_key[9];   // 1
             8'h1E: kb_start2 <= ps2_key[9];   // 2
-            8'h2D: kb_up2    <= ps2_key[9];   // R
-            8'h2B: kb_dn2    <= ps2_key[9];   // F
-            8'h23: kb_lf2    <= ps2_key[9];   // D
-            8'h34: kb_rt2    <= ps2_key[9];   // G
-            8'h1C: kb_b1_2   <= ps2_key[9];   // A
             default: ;
         endcase
     end
 end
-wire [31:0] joy1 = joystick_1 | {27'd0, kb_b1_2, kb_up2, kb_dn2, kb_lf2, kb_rt2};
+wire [31:0] joy1 = joystick_1;   // player 2 plays on the second controller only (no keyboard stick or fire)
 
 // P1 / P2: KONAMI8_B1: bit0 Left, bit1 Right, bit2 Up, bit3 Down, bit4 Button 1, bits 5 and 6 unused (all active low). P1 bit 7 is the
 // "Allow Continue" DIP (SW3:4): 0x80 = 3 times, 0x00 = 5 times; P2 bit 7 is unused.
@@ -1177,7 +1198,7 @@ wire [7:0] rack_p2 = { 1'b1,       1'b1, 1'b1, ~joy1[4],       ~joy1[2],       ~
 // bit6 upright controls (1 = single, 0 = dual), bit7 service mode (active low).
 wire [7:0] rack_dsw3 = {
     ~status[17],                    // bit7 service mode
-    ~status[18],                    // bit6 upright controls: OSD Single (0) -> 1
+    ~dual_ctrl,                     // bit6 upright controls: OSD Single (0) -> 1, Cabinet Cocktail forces Dual (0)
     ~status[16],                    // bit5 flip screen
     ~(joystick_1[6] | joystick_0[7] | kb_start2),   // bit4 start 2 (Start 2 on controller 2, or the Start 2 button of controller 1, or key 2)
     ~(joystick_0[6] | kb_start1),   // bit3 start 1
