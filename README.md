@@ -2,7 +2,7 @@
 
 # Battlantis for MiSTer
 
-**Version 2.0.2** (release `releases/Battlantis_20261018b.rbf`).
+**Version 2.0.3** (release `releases/Battlantis_20261018c.rbf`).
 
 Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch for the MiSTer FPGA. Three versions in one core, scores that save, a sharp picture on a CRT, and an OSD you can understand at a glance.
 
@@ -51,7 +51,7 @@ Konami's 1987 arcade shooter **Battlantis** (GX777 board), rebuilt from scratch 
 | | | |
 |:-:|---|---|
 | <img src="docs/readme/icons/chip.png" width="48"> | **You need** | The MiSTer **SDRAM module** and your own legally obtained ROM set |
-| <img src="docs/readme/icons/folder.png" width="48"> | **1. Core file** | Copy the core file (`Battlantis_20261018b.rbf`) to `/media/fat/_Arcade/cores/` |
+| <img src="docs/readme/icons/folder.png" width="48"> | **1. Core file** | Copy the core file (`Battlantis_20261018c.rbf`) to `/media/fat/_Arcade/cores/` |
 | <img src="docs/readme/icons/doc.png" width="48"> | **2. MRA file** | Copy `Battlantis.mra` to `/media/fat/_Arcade/` |
 | <img src="docs/readme/icons/zip.png" width="48"> | **3. ROM set** | Put `battlnts.zip` in `/media/fat/games/mame/`. It must also contain the files of the other two versions (folders `battlntsa` and `battlntsj`), as in the full MAME set |
 | <img src="docs/readme/icons/play.png" width="48"> | **4. Play** | Start **Battlantis** from the Arcade menu |

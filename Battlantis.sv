@@ -99,6 +99,7 @@ localparam CONF_STR = {
 	"P1,Video;",
 	"P1O[1],HDMI Orientation,Horizontal,Vertical;",
 	"P1O[2],Flip Monitor,Off,On;",
+	"P1O[9],HDMI Cocktail Flip,Off,On;",
 	"P1O[4:3],Aspect ratio,Original,Pixel Perfect,Full Screen;",
 	"P1-;",
 	// CRT (analog output), independent of the HDMI options above. Orientation Vertical (raw) is the unrotated 15 kHz raster of the real board (a vertical
@@ -1428,7 +1429,11 @@ assign VGA_DE = crt_de;
 // Battlantis: the game's own flip request (K007342 reg 0 bit 4) is NOT used. This ROM toggles it at times a real board does not (a long
 // standing, never fully traced divergence in the old project notes, Rounds 213 to 221), which turned the HDMI picture upside down at boot.
 // Battlantis ignores it for the same reason (cocktail flip dropped as not authentic); the Flip Monitor option covers anyone who needs a flip.
-wire effective_flip = flip_monitor;
+// HDMI Cocktail Flip (status[9]): for a cocktail table whose monitor is fed by HDMI (or by the VGA Scaler, which carries the HDMI picture). Only with
+// Cabinet Cocktail, and only while the game asks for the flip (player 2's turn), the same condition the analog output uses; it combines (xor) with
+// the Flip Monitor option. Off (the default) leaves every existing setup unchanged.
+wire hdmi_cocktail_flip = status[9] & status[10] & flip_screen_req;
+wire effective_flip = flip_monitor ^ hdmi_cocktail_flip;
 // Cocktail cabinet: with the Cabinet DIP set to Cocktail the game itself flips the picture for player 2's turn (K007342 register 0 bit 4, flip_screen_req).
 // That is applied to the ANALOG output only (the MiSTer in a real cocktail cabinet drives a CRT through the analog port); the HDMI picture never
 // flips on its own. With the DIP on Upright the request is ignored altogether, which also keeps the toggling this ROM does at boot (a real board
